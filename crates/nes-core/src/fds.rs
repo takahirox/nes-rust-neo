@@ -361,12 +361,11 @@ impl Fds {
                 0x4030 => {
                     let status = (open & 0x24)
                         | u8::from(self.timer.irq)
-                        | (u8::from(self.drive.transfer) << 1)
                         | (self.drive.control & 8)
                         | (u8::from(self.drive.crc_error) << 4)
-                        | (u8::from(self.drive.head == TRACK_BYTES) << 6);
+                        | (u8::from(self.drive.head == TRACK_BYTES) << 6)
+                        | (u8::from(self.drive.transfer) << 7);
                     self.timer.irq = false;
-                    self.drive.acknowledge_transfer();
                     status
                 }
                 0x4031 => {
@@ -572,11 +571,15 @@ mod tests {
         assert!(!fds.irq());
         clock(&mut fds, 1);
         assert!(fds.irq());
+        assert_eq!(fds.cpu_read(0x4030, 0) & 0x82, 0x80);
+        assert_eq!(fds.cpu_read(0x4030, 0) & 0x82, 0x80);
+        assert!(fds.irq());
         assert_eq!(fds.cpu_read(0x4031, 0), 1);
+        assert_eq!(fds.cpu_read(0x4030, 0) & 0x82, 0);
         assert!(!fds.irq());
         for index in 1..57 {
             clock(&mut fds, BYTE_CYCLES);
-            assert_eq!(fds.cpu_read(0x4030, 0), 2);
+            assert_eq!(fds.cpu_read(0x4030, 0), 0x80);
             let value = fds.cpu_read(0x4031, 0);
             if let Some(&expected) = DISK_SIGNATURE.get(index) {
                 assert_eq!(value, expected);
@@ -637,7 +640,9 @@ mod tests {
             fds.cpu_write(0x4025, 0xc1);
             clock(&mut fds, SPINUP_CYCLES);
             assert!(fds.irq());
+            assert_eq!(fds.cpu_read(0x4030, 0) & 0x82, 0x80);
             fds.cpu_write(0x4024, 10 + side as u8);
+            assert_eq!(fds.cpu_read(0x4030, 0) & 0x82, 0);
             assert!(!fds.irq());
             clock(&mut fds, BYTE_CYCLES);
             fds.cpu_write(0x4025, 0xd1);

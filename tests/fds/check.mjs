@@ -32,7 +32,7 @@ try {
   const initialFile = await readFile(new URL(image, output));
   run(image, 1, [], ['--disk-save-out', original]);
   const replay = run(image, 285, [
-    [27, 0x1f, 0], [27, 8, 3], [29, 0x10, 1], [54, 0x11, 0x46],
+    [27, 0x1f, 0], [27, 8, 0x81], [29, 0x10, 1], [54, 0x11, 0x46],
     [100, 0x12, 0x12], [135, 0x10, 2], [191, 0x12, 0x23], [225, 0x10, 3],
     [280, 0x12, 0x34], [280, 0x13, 3], [280, 0x19, 2],
   ], ['--replay', 'fds-relay.replay', '--disk', '105:eject', '--disk', '106:2',

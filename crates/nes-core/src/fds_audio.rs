@@ -161,9 +161,8 @@ impl FdsAudio {
                 }
             }
             0x4088 if self.mod_halted => {
-                let index = (self.mod_phase >> 16) as usize;
-                self.mod_table[index] = value & 7;
-                self.mod_table[(index + 1) & 63] = value & 7;
+                let index = ((self.mod_phase >> 16) as usize) & !1;
+                self.mod_table[index..index + 2].fill(value & 7);
                 self.mod_phase = (self.mod_phase + (2 << 16)) & Self::PHASE_MASK;
             }
             0x4089 => self.level_control = value,
@@ -232,5 +231,35 @@ mod tests {
         }
         assert_eq!(audio.bias, 0);
         assert_eq!(audio.modulation_offset(), 0);
+    }
+
+    #[test]
+    fn modulation_write_at_odd_step_updates_only_its_entry() {
+        let mut audio = FdsAudio::default();
+        audio.write(0x4088, 1);
+        audio.write(0x4088, 2);
+        assert_eq!(&audio.mod_table[..4], &[1, 1, 2, 2]);
+        audio.mod_phase = 1 << 16;
+        audio.write(0x4088, 3);
+        assert_eq!(&audio.mod_table[..4], &[3, 3, 2, 2]);
+        assert_eq!(audio.mod_phase, 3 << 16);
+
+        audio.mod_phase = 1 << 16;
+        audio.write(0x4084, 0x90);
+        audio.write(0x4083, 4);
+        audio.write(0x4086, 0xff);
+        audio.write(0x4087, 0x0f);
+        for _ in 0..16 {
+            audio.tick();
+        }
+        assert_eq!(audio.bias, 0);
+        let previous_phase = audio.wave_phase;
+        audio.tick();
+        assert_eq!(audio.bias, 4);
+        assert_eq!(audio.wave_phase - previous_phase, 1088);
+        for _ in 0..16 {
+            audio.tick();
+        }
+        assert_eq!(audio.bias, 6);
     }
 }
