@@ -43,7 +43,7 @@ function warn(category, message) {
   const text = parts.join(' ');
   if (get('warnings').textContent !== text) get('warnings').textContent = text;
   get('warnings').hidden = parts.length === 0;
-  get('retry-save').hidden = !pendingCartridge && !saveWarning;
+  get('retry-save').hidden = Boolean(pendingCartridge?.conflict) || (!pendingCartridge && !saveWarning);
 }
 
 function soundError(error) {
@@ -71,6 +71,7 @@ function syncUI() {
   cartridgeButton.disabled = !core;
   get('open-file').disabled = !core || busy;
   get('retry-save').disabled = busy;
+  get('save-choices').disabled = busy;
   for (const button of library.querySelectorAll('button')) button.disabled = busy;
   pads.setEnabled(enabled());
 }
@@ -135,7 +136,9 @@ function storePreferences() {
 async function refreshLibrary() {
   try {
     const cartridges = await listCartridges();
-    const rows = cartridges.map(({ id, name }) => {
+    const nameCounts = new Map();
+    for (const { name } of cartridges) nameCounts.set(name, (nameCounts.get(name) ?? 0) + 1);
+    const rows = cartridges.map(({ id, name }, index) => {
       const row = document.createElement('li');
       const open = document.createElement('button');
       open.textContent = name;
@@ -159,6 +162,15 @@ async function refreshLibrary() {
         await refreshLibrary();
         get('library-status').textContent = `Removed ${name} from this browser’s list.`;
       });
+      if (nameCounts.get(name) > 1) {
+        const hash = document.createElement('small');
+        hash.id = `rom-hash-${index}`;
+        hash.textContent = id.slice(0, 12);
+        open.setAttribute('aria-label', name);
+        open.setAttribute('aria-describedby', hash.id);
+        remove.setAttribute('aria-describedby', hash.id);
+        open.append(hash);
+      }
       row.append(open, remove);
       return row;
     });
@@ -194,28 +206,62 @@ async function operate(operation) {
     syncUI();
     if (cartridgePicker.matches(':popover-open')) {
       if (!cartridgePicker.contains(document.activeElement)) get('open-file').focus({ preventScroll: true });
+    } else if (pendingCartridge?.conflict) {
+      get('save-versions').querySelector('button').focus({ preventScroll: true });
     } else if (active && running && !document.hidden && !help.open) {
       canvas.focus({ preventScroll: true });
     }
   }
 }
 
-async function insert(record, rememberImport = false) {
+function showSaveChoices(record, rememberImport, conflict) {
+  const options = get('save-versions');
+  options.replaceChildren();
+  get('save-choices').hidden = !conflict;
+  if (!conflict) return;
+  const addChoice = (label, raw) => {
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.textContent = label;
+    button.onclick = () => {
+      unlockAudio();
+      operate(() => insert(record, rememberImport, { conflict, raw }));
+    };
+    options.append(button);
+  };
+  conflict.versions.forEach(({ raw, savedAt }, index) => {
+    const date = savedAt ? ` (${new Date(savedAt).toLocaleString()})` : '';
+    addChoice(`Use recovery copy ${index + 1}${date}`, raw);
+  });
+  addChoice(conflict.base === null ? 'Start without a save' : 'Use the stored save', conflict.base);
+}
+
+async function insert(record, rememberImport = false, selection) {
   const { bytes, id, name } = record;
   const size = core.prepare(new Uint8Array(bytes));
   await flushSave();
   let save;
   try {
-    save = await saves.open(id, name, size, core);
+    save = await saves.open(id, name, size, core, selection);
   } catch {
     pendingCartridge = { record, rememberImport };
+    showSaveChoices();
     cartridgePicker.hidePopover();
     warn('restore', `Could not restore the battery save for ${name}. Existing data is protected.`);
+    return;
+  }
+  if (save?.conflict) {
+    pendingCartridge = { record, rememberImport, conflict: save.conflict };
+    cartridgePicker.hidePopover();
+    showSaveChoices(record, rememberImport, save.conflict);
+    const reason = selection ? `The available save versions for ${name} changed.` : `Multiple recovery copies exist for ${name}.`;
+    warn('restore', `${reason} Choose the version to keep. This removes the other copies.`);
     return;
   }
   core.activate();
   if (save) save.revision = core.saveRevision();
   pendingCartridge = undefined;
+  showSaveChoices();
   active = { name, save };
   running = true;
   budget = frameMs;

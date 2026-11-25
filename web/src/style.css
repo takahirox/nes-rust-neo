@@ -148,6 +148,7 @@ canvas:focus-visible { outline-offset: -3px; }
 #my-cartridges { margin-bottom: 8px; }
 #library { display: grid; gap: 4px; margin: 0; padding: 0; list-style: none; }
 #library li { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 4px; }
+#library small { display: block; color: #58665f; font-size: 11px; }
 #cartridge-picker button { width: 100%; min-height: 44px; text-align: left; overflow-wrap: anywhere; }
 #cartridge-picker .remove-cartridge { padding: 4px 8px; border-color: transparent; font-size: 12px; }
 #library-status { color: #a32f29; margin: 0 0 8px; overflow-wrap: anywhere; }
@@ -163,6 +164,7 @@ canvas:focus-visible { outline-offset: -3px; }
 #status { margin: 0 0 0 auto; color: #4c6256; font-size: 13px; overflow-wrap: anywhere; }
 #status:empty, #library-status:empty { display: none; }
 #warnings { color: #805511; font-size: 13px; overflow-wrap: anywhere; }
+#save-versions { display: flex; flex-wrap: wrap; gap: 8px; }
 
 .touch, #exit-fullscreen { display: none; }
 @media (max-width: 760px), (pointer: coarse), (orientation: landscape) and (max-height: 600px) and (max-width: 1100px) {

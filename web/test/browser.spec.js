@@ -369,6 +369,43 @@ test('remembered ROMs, saves per identity, reset, removal and preferences', asyn
   await seeColor(page, pressColor);
 });
 
+test('same-named cartridges have visible and accessible identifiers for opening and removal', async ({ page }) => {
+  await coreReady(page);
+  const variants = ['diagnostic', 'diagnostic-alternate'];
+  const hashes = [];
+  for (const [index, name] of variants.entries()) {
+    const buffer = await readFile(fixture(name));
+    const hash = createHash('sha256').update(buffer).digest('hex');
+    hashes.push(hash.slice(0, 12));
+    const save = Buffer.alloc(8192);
+    save[0] = index + 1;
+    await page.evaluate(({ hash, raw }) => localStorage.setItem('nes-rust-neo/battery-v1/' + hash, raw),
+      { hash, raw: save.toString('base64') });
+    await page.locator('#rom').setInputFiles({ name: 'same.nes', mimeType: 'application/octet-stream', buffer });
+    await expect(page.locator('#library li')).toHaveCount(index + 1);
+  }
+
+  await page.reload();
+  const rowFor = hash => page.locator('#library li').filter({ hasText: hash });
+  for (const [index, hash] of hashes.entries()) {
+    await openCartridges(page);
+    const row = rowFor(hash);
+    await expect(row.getByText(hash, { exact: true })).toBeVisible();
+    const open = row.getByRole('button', { name: 'same.nes', exact: true });
+    await expect(open).toHaveAccessibleDescription(hash);
+    await expect(row.getByRole('button', { name: 'Remove same.nes', exact: true })).toHaveAccessibleDescription(hash);
+    await open.click();
+    await seeColor(page, [pressColor, secondPressColor][index]);
+  }
+  await openCartridges(page);
+  await rowFor(hashes[0]).getByRole('button', { name: 'Remove same.nes', exact: true }).click();
+  await expect(page.locator('#library li')).toHaveCount(1);
+  await page.reload();
+  await openCartridges(page);
+  await page.getByRole('button', { name: 'same.nes', exact: true }).click();
+  await seeColor(page, secondPressColor);
+});
+
 test('failed save restore preserves the paused cartridge and retry inserts the candidate', async ({ page }) => {
   await page.addInitScript(() => {
     const getItem = Storage.prototype.getItem;
@@ -577,6 +614,72 @@ for (const competingSave of [false, true]) {
     await expect(page.locator('#warnings')).toBeHidden();
   });
 }
+
+test('closing two queued writers keeps both recovery copies until a version is chosen', async ({ page, context }) => {
+  const lockTab = await context.newPage();
+  const second = await context.newPage();
+  await coreReady(lockTab);
+  await coreReady(page);
+  await choose(page);
+  await seeColor(page, originalColor);
+  const storageKey = await batteryKey();
+  await key(page, 'x', pressColor);
+  await expect.poll(() => savedValue(lockTab, storageKey)).toBe(1);
+
+  await coreReady(second);
+  await choose(second);
+  await seeColor(second, pressColor);
+  const drafts = () => lockTab.evaluate(key => {
+    const prefix = key.replace('/battery-v1/', '/battery-draft-v1/') + '/';
+    return Object.keys(localStorage).filter(name => name.startsWith(prefix))
+      .map(name => atob(JSON.parse(localStorage.getItem(name)).raw).charCodeAt(0)).sort();
+  }, storageKey);
+  await holdSaveLock(lockTab, storageKey);
+  try {
+    for (const writer of [page, second]) {
+      await writer.bringToFront();
+      await writer.locator('canvas').focus();
+      await key(writer, 'ArrowRight', [100, 176, 255]);
+      await key(writer, 'x', secondPressColor);
+      if (writer === second) {
+        await key(writer, 'ArrowRight', [100, 176, 255]);
+        await key(writer, 'x', thirdPressColor);
+      }
+      await writer.getByRole('button', { name: 'Pause', exact: true }).click();
+    }
+    await expect.poll(() => queuedSaveWrites(lockTab, storageKey)).toBe(2);
+    await expect.poll(drafts).toEqual([2, 3]);
+    await page.close();
+    await second.close();
+    await expect.poll(() => queuedSaveWrites(lockTab, storageKey)).toBe(0);
+  } finally {
+    await lockTab.evaluate(() => window.releaseSaveLock());
+  }
+
+  const reopened = await context.newPage();
+  await coreReady(lockTab);
+  await coreReady(reopened);
+  for (const reader of [lockTab, reopened]) {
+    await openCartridges(reader);
+    await reader.getByRole('button', { name: 'diagnostic.nes', exact: true }).click();
+    await expect(reader.getByRole('group', { name: 'Battery save recovery' })).toBeVisible();
+    await expect(reader.getByRole('button', { name: /^Use recovery copy / })).toHaveCount(2);
+    await expect(reader.getByRole('button', { name: 'Retry save storage' })).toBeHidden();
+    await expect(reader.locator('#inserted')).toHaveText('None');
+    expect(await savedValue(lockTab, storageKey)).toBe(1);
+    expect(await drafts()).toEqual([2, 3]);
+  }
+  await reopened.getByRole('button', { name: /^Use recovery copy 2/ }).click();
+  await seeColor(reopened, thirdPressColor);
+  await expect.poll(() => savedValue(lockTab, storageKey)).toBe(3);
+  await expect.poll(drafts).toEqual([]);
+  // A choice from the other tab's old view cannot undo the resolution.
+  await lockTab.getByRole('button', { name: /^Use recovery copy 1/ }).click();
+  await expect(lockTab.getByRole('button', { name: /^Use recovery copy / })).toHaveCount(0);
+  expect(await savedValue(lockTab, storageKey)).toBe(3);
+  await lockTab.getByRole('button', { name: 'Use the stored save' }).click();
+  await seeColor(lockTab, thirdPressColor);
+});
 
 test('two tabs serialize save writes and a stale tab preserves the winning save', async ({ page: winner, context }) => {
   const stale = await context.newPage();
