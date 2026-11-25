@@ -1,0 +1,14 @@
+{
+  "name": "nes-rust-neo-web",
+  "private": true,
+  "type": "module",
+  "engines": { "node": ">=22" },
+  "scripts": {
+    "build": "node scripts/build.mjs",
+    "serve": "node scripts/serve.mjs",
+    "test": "node ../tests/roms/build.mjs && playwright test"
+  },
+  "devDependencies": {
+    "@playwright/test": "1.62.0"
+  }
+}
