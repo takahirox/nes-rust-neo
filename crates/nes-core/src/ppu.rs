@@ -1,5 +1,5 @@
-use crate::cartridge::{Cartridge, Mirroring};
 use crate::{HEIGHT, WIDTH};
+use crate::{Mirroring, board::Board};
 
 #[rustfmt::skip]
 const COLORS: [u32; 64] = [
@@ -140,22 +140,22 @@ impl Ppu {
         }
     }
 
-    fn read(&self, cart: &mut Cartridge, address: u16) -> u8 {
+    fn read(&self, board: &mut Board, address: u16) -> u8 {
         let address = address & 0x3fff;
-        cart.ppu_address(address, self.clock);
+        board.ppu_address(address, self.clock);
         match address {
-            0..=0x1fff => cart.chr_read(address),
-            0x2000..=0x3eff => self.vram[Self::nametable(address, cart.mirroring())],
+            0..=0x1fff => board.chr_read(address),
+            0x2000..=0x3eff => self.vram[Self::nametable(address, board.mirroring())],
             _ => self.palette[Self::palette_address(address)],
         }
     }
 
-    fn write(&mut self, cart: &mut Cartridge, address: u16, value: u8) {
+    fn write(&mut self, board: &mut Board, address: u16, value: u8) {
         let address = address & 0x3fff;
-        cart.ppu_address(address, self.clock);
+        board.ppu_address(address, self.clock);
         match address {
-            0..=0x1fff => cart.chr_write(address, value),
-            0x2000..=0x3eff => self.vram[Self::nametable(address, cart.mirroring())] = value,
+            0..=0x1fff => board.chr_write(address, value),
+            0x2000..=0x3eff => self.vram[Self::nametable(address, board.mirroring())] = value,
             _ => self.palette[Self::palette_address(address)] = value & 0x3f,
         }
     }
@@ -186,17 +186,17 @@ impl Ppu {
         self.v = (self.v & !0x3e0) | (next << 5);
     }
 
-    fn increment_data(&mut self, cart: &mut Cartridge) {
+    fn increment_data(&mut self, board: &mut Board) {
         if self.rendering() && self.render_line() {
             self.increment_x();
             self.increment_y();
         } else {
             self.v = self.v.wrapping_add(if self.ctrl & 4 != 0 { 32 } else { 1 }) & 0x7fff;
-            cart.ppu_address(self.v & 0x3fff, self.clock);
+            board.ppu_address(self.v & 0x3fff, self.clock);
         }
     }
 
-    pub fn cpu_read(&mut self, cart: &mut Cartridge, reg: u16) -> u8 {
+    pub fn cpu_read(&mut self, board: &mut Board, reg: u16) -> u8 {
         self.latch = match reg {
             2 => {
                 if self.scanline == 241 && self.dot <= 1 {
@@ -213,14 +213,14 @@ impl Ppu {
                 let address = self.v & 0x3fff;
                 let old = self.buffer;
                 let out = if address >= 0x3f00 {
-                    self.buffer = self.read(cart, address - 0x1000);
+                    self.buffer = self.read(board, address - 0x1000);
                     let color = self.palette[Self::palette_address(address)];
                     (color & if self.mask & 1 == 0 { 0x3f } else { 0x30 }) | (self.latch & 0xc0)
                 } else {
-                    self.buffer = self.read(cart, address);
+                    self.buffer = self.read(board, address);
                     old
                 };
-                self.increment_data(cart);
+                self.increment_data(board);
                 out
             }
             _ => self.latch,
@@ -228,7 +228,7 @@ impl Ppu {
         self.latch
     }
 
-    pub fn cpu_write(&mut self, cart: &mut Cartridge, reg: u16, value: u8) {
+    pub fn cpu_write(&mut self, board: &mut Board, reg: u16, value: u8) {
         self.latch = value;
         match reg {
             0 => {
@@ -261,7 +261,7 @@ impl Ppu {
                     self.t = (self.t & 0x7f00) | u16::from(value);
                     self.v = self.t;
                     if !self.rendering() || !self.render_line() {
-                        cart.ppu_address(self.v & 0x3fff, self.clock);
+                        board.ppu_address(self.v & 0x3fff, self.clock);
                     }
                 } else {
                     self.t = (self.t & 0xff) | (u16::from(value & 0x3f) << 8);
@@ -269,8 +269,8 @@ impl Ppu {
                 self.second_write = !self.second_write;
             }
             7 => {
-                self.write(cart, self.v, value);
-                self.increment_data(cart);
+                self.write(board, self.v, value);
+                self.increment_data(board);
             }
             _ => {}
         }
@@ -286,21 +286,21 @@ impl Ppu {
         self.oam_address = self.oam_address.wrapping_add(1);
     }
 
-    fn background_fetch(&mut self, cart: &mut Cartridge) {
+    fn background_fetch(&mut self, board: &mut Board) {
         let pattern_address =
             (u16::from(self.ctrl & 0x10) << 8) | (u16::from(self.tile) << 4) | (self.v >> 12);
         match self.dot & 7 {
             1 => {
                 self.load_background();
-                self.tile = self.read(cart, 0x2000 | (self.v & 0xfff));
+                self.tile = self.read(board, 0x2000 | (self.v & 0xfff));
             }
             3 => {
                 let addr = 0x23c0 | (self.v & 0xc00) | ((self.v >> 4) & 0x38) | ((self.v >> 2) & 7);
                 let quadrant = ((self.v >> 4) & 4) | (self.v & 2);
-                self.attribute = (self.read(cart, addr) >> quadrant) & 3;
+                self.attribute = (self.read(board, addr) >> quadrant) & 3;
             }
-            5 => self.pattern_lo = self.read(cart, pattern_address),
-            7 => self.pattern_hi = self.read(cart, pattern_address + 8),
+            5 => self.pattern_lo = self.read(board, pattern_address),
+            7 => self.pattern_hi = self.read(board, pattern_address + 8),
             0 => self.increment_x(),
             _ => {}
         }
@@ -363,17 +363,17 @@ impl Ppu {
         }
     }
 
-    fn sprite_fetch(&mut self, cart: &mut Cartridge) {
+    fn sprite_fetch(&mut self, board: &mut Board) {
         self.oam_address = 0;
         let offset = usize::from(self.dot - 257);
         let slot = offset / 8;
         let address = self.next_sprites[slot].address;
         match offset % 8 {
             0 | 2 => {
-                self.read(cart, 0x2000 | (self.v & 0xfff));
+                self.read(board, 0x2000 | (self.v & 0xfff));
             }
-            4 => self.next_sprites[slot].lo = self.read(cart, address),
-            6 => self.next_sprites[slot].hi = self.read(cart, address + 8),
+            4 => self.next_sprites[slot].lo = self.read(board, address),
+            6 => self.next_sprites[slot].hi = self.read(board, address + 8),
             _ => {}
         }
     }
@@ -443,7 +443,7 @@ impl Ppu {
         self.frame[offset..offset + 4].copy_from_slice(&[r, g, b, 255]);
     }
 
-    pub fn tick(&mut self, cart: &mut Cartridge) {
+    pub fn tick(&mut self, board: &mut Board) {
         if self.scanline == 241 && self.dot == 1 {
             if !self.suppress_vblank {
                 self.status |= 0x80;
@@ -463,7 +463,7 @@ impl Ppu {
                 }
             }
             if (1..=256).contains(&self.dot) || (321..=336).contains(&self.dot) {
-                self.background_fetch(cart);
+                self.background_fetch(board);
             }
             match self.dot {
                 256 => self.increment_y(),
@@ -474,15 +474,15 @@ impl Ppu {
                 }
                 337 => {
                     self.load_background();
-                    self.read(cart, 0x2000 | (self.v & 0xfff));
+                    self.read(board, 0x2000 | (self.v & 0xfff));
                 }
                 339 => {
-                    self.read(cart, 0x2000 | (self.v & 0xfff));
+                    self.read(board, 0x2000 | (self.v & 0xfff));
                 }
                 _ => {}
             }
             if (257..=320).contains(&self.dot) {
-                self.sprite_fetch(cart);
+                self.sprite_fetch(board);
             }
             if self.scanline == 261 && (280..=304).contains(&self.dot) {
                 self.v = (self.v & !0x7be0) | (self.t & 0x7be0);

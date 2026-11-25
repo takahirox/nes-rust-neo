@@ -1,6 +1,6 @@
 # Test fixtures and verification
 
-This accompanies Issue #3. The generated cartridges exercise the regular cartridge, CPU, PPU and APU paths in native Rust and the production WebAssembly build.
+This records the cartridge baseline for Issue #3. See [FDS verification](fds-verification.md) for the unified picker, FDS fixtures and current media audit. The generated cartridges exercise the regular cartridge, CPU, PPU and APU paths in native Rust and the production WebAssembly build.
 
 ## Provenance
 

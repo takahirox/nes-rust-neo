@@ -443,7 +443,7 @@ impl Apu {
         }
     }
 
-    pub fn tick(&mut self, cycle: u64) {
+    pub fn tick(&mut self, cycle: u64, expansion: f32) {
         if let Some((when, five)) = self.reset_at
             && cycle == when
         {
@@ -484,16 +484,17 @@ impl Apu {
         self.sample_phase += SAMPLE_RATE;
         if self.sample_phase >= CPU_HZ {
             self.sample_phase -= CPU_HZ;
-            self.sample();
+            self.sample(expansion);
         }
     }
 
-    fn sample(&mut self) {
+    fn sample(&mut self, expansion: f32) {
         let pulse = f32::from(self.pulses[0].value() + self.pulses[1].value());
         let tnd = f32::from(self.triangle.output) / 8227.0
             + f32::from(self.noise.value()) / 12241.0
             + f32::from(self.dmc.output) / 22638.0;
         let mix = 95.88 * pulse / (8128.0 + 100.0 * pulse) + 159.79 * tnd / (1.0 + 100.0 * tnd);
+        let mix = mix + expansion;
         // One-pole NES output filters, at the fixed 48 kHz output rate.
         self.high_90 = 0.9883 * (self.high_90 + mix - self.last_mix);
         self.last_mix = mix;

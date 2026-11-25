@@ -204,6 +204,7 @@ fn mmc3_banking_mirroring_and_scanline_irq() {
     cart.cpu_write(0xc000, 2, 0);
     cart.cpu_write(0xc001, 0, 0);
     cart.cpu_write(0xe001, 0, 0);
+    let mut cart = crate::Board::Cartridge(Box::new(cart));
     let mut ppu = Ppu::new();
     ppu.cpu_write(&mut cart, 0, 8); // Sprite patterns $1000, background $0000.
     ppu.cpu_write(&mut cart, 1, 0x18);
@@ -345,20 +346,21 @@ fn controller_latch_open_bus_and_oam_dma() {
     }
 }
 
-fn ppaddr(ppu: &mut Ppu, cart: &mut Cartridge, address: u16) {
+fn ppaddr(ppu: &mut Ppu, cart: &mut crate::Board, address: u16) {
     let [hi, lo] = address.to_be_bytes();
     ppu.cpu_write(cart, 6, hi);
     ppu.cpu_write(cart, 6, lo);
 }
 
-fn ppwrite(ppu: &mut Ppu, cart: &mut Cartridge, address: u16, value: u8) {
+fn ppwrite(ppu: &mut Ppu, cart: &mut crate::Board, address: u16, value: u8) {
     ppaddr(ppu, cart, address);
     ppu.cpu_write(cart, 7, value);
 }
 
 #[test]
 fn ppu_register_buffer_mirroring_and_nmi_edge() {
-    let mut cart = Cartridge::from_ines(&rom(0, 1, 0, 1)).unwrap();
+    let cart = Cartridge::from_ines(&rom(0, 1, 0, 1)).unwrap();
+    let mut cart = crate::Board::Cartridge(Box::new(cart));
     let mut ppu = Ppu::new();
     ppwrite(&mut ppu, &mut cart, 0x2000, 55);
     ppwrite(&mut ppu, &mut cart, 0x2400, 66);
@@ -386,7 +388,8 @@ fn ppu_register_buffer_mirroring_and_nmi_edge() {
 
 #[test]
 fn ppu_scroll_pixel_priority_sprite_hit_and_odd_frame() {
-    let mut cart = Cartridge::from_ines(&rom(0, 1, 0, 1)).unwrap();
+    let cart = Cartridge::from_ines(&rom(0, 1, 0, 1)).unwrap();
+    let mut cart = crate::Board::Cartridge(Box::new(cart));
     let mut ppu = Ppu::new();
     for (address, value) in [
         (0x3f00, 0x0f),
@@ -447,7 +450,7 @@ fn apu_channels_frame_irq_and_dmc_dma() {
         }
         assert_eq!(apu.status(0) & 15, enable);
         for cycle in 1..=30_000 {
-            apu.tick(cycle);
+            apu.tick(cycle, 0.0);
         }
         assert_eq!(apu.audio().len(), 804);
         assert!(apu.audio().iter().any(|sample| sample.abs() > 0.01));
