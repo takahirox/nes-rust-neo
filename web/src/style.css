@@ -166,7 +166,7 @@ canvas:focus-visible { outline-offset: -3px; }
 #warnings { color: #805511; font-size: 13px; overflow-wrap: anywhere; }
 #save-versions { display: flex; flex-wrap: wrap; gap: 8px; }
 
-.touch, #exit-fullscreen { display: none; }
+.touch, #exit-fullscreen, #fullscreen-disk-save { display: none; }
 @media (max-width: 760px), (pointer: coarse), (orientation: landscape) and (max-height: 600px) and (max-width: 1100px) {
   main {
     --controller-width: clamp(132px, 23%, 156px);
@@ -257,6 +257,25 @@ canvas:focus-visible { outline-offset: -3px; }
   color: white;
   font-size: 13px;
 }
+.game-presentation:fullscreen #fullscreen-disk-save {
+  display: grid;
+  justify-items: start;
+  gap: 8px;
+  position: absolute;
+  z-index: 1;
+  inset-block-start: max(8px, env(safe-area-inset-top));
+  inset-inline-start: max(8px, env(safe-area-inset-left));
+  inset-inline-end: calc(max(8px, env(safe-area-inset-right)) + 125px);
+  max-width: 440px;
+  padding: 8px 12px;
+  border: 1px solid #727c82;
+  border-radius: 8px;
+  background: #20262b;
+  color: white;
+  font-size: 13px;
+}
+#fullscreen-disk-warning { margin: 0; overflow-wrap: anywhere; }
+#fullscreen-retry-disk { min-height: 44px; padding: 6px 12px; color: #252b32; }
 @media (pointer: coarse) {
   .game-presentation:fullscreen {
     grid-template-rows: minmax(0, 1fr) auto auto;
@@ -265,6 +284,9 @@ canvas:focus-visible { outline-offset: -3px; }
       max(8px, env(safe-area-inset-bottom)) max(8px, env(safe-area-inset-left));
   }
   .game-presentation:fullscreen .touch { display: grid; grid-area: 2 / 1; }
+  .game-presentation:fullscreen #fullscreen-disk-save {
+    inset-inline-end: max(8px, env(safe-area-inset-right));
+  }
   .game-presentation:fullscreen #exit-fullscreen {
     grid-area: 3 / 1 / 4 / -1;
     justify-self: center;
