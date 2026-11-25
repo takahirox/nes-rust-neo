@@ -206,7 +206,7 @@ async function insert(record, rememberImport = false) {
   await flushSave();
   let save;
   try {
-    save = saves.open(id, name, size, core);
+    save = await saves.open(id, name, size, core);
   } catch {
     pendingCartridge = { record, rememberImport };
     cartridgePicker.hidePopover();

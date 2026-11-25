@@ -432,9 +432,11 @@ test('the first battery change survives an immediate reload', async ({ page }) =
   await expect(page.locator('#warnings')).toBeHidden();
 });
 
-for (const competingSave of [false, true]) {
+for (const [departure, competingSave] of [
+  ['reload', false], ['reload', true], ['tab close', false], ['tab close', true],
+]) {
   const outcome = competingSave ? 'keeps the competing save protected' : 'commits the recovered progress';
-  test(`reload with a queued battery write ${outcome}`, async ({ page, context }) => {
+  test(`${departure} with a queued battery write ${outcome}`, async ({ page, context }) => {
     await coreReady(page);
     await choose(page);
     await seeColor(page, originalColor);
@@ -454,7 +456,16 @@ for (const competingSave of [false, true]) {
       await expect.poll(() => queuedSaveWrites(other, storageKey)).toBe(1);
       expect(await savedValue(other, storageKey)).toBe(1);
 
-      await page.reload();
+      if (departure === 'tab close') {
+        // A live tab's queued progress belongs to that tab until it closes.
+        await other.bringToFront();
+        await openCartridges(other);
+        await other.getByRole('button', { name: 'diagnostic.nes', exact: true }).click();
+        await seeColor(other, pressColor);
+        await page.close();
+      } else {
+        await page.reload();
+      }
       await expect.poll(() => queuedSaveWrites(other, storageKey)).toBe(0);
       if (competingSave) {
         // Simulate a write by the other tab while it owns the save lock.
@@ -464,22 +475,24 @@ for (const competingSave of [false, true]) {
       await other.evaluate(() => window.releaseSaveLock());
     }
 
-    await openCartridges(page);
-    await page.getByRole('button', { name: 'diagnostic.nes', exact: true }).click();
-    await seeColor(page, secondPressColor);
+    const reopened = departure === 'tab close' ? await context.newPage() : page;
+    if (reopened !== page) await coreReady(reopened);
+    await openCartridges(reopened);
+    await reopened.getByRole('button', { name: 'diagnostic.nes', exact: true }).click();
+    await seeColor(reopened, secondPressColor);
     if (competingSave) {
-      await expect(page.locator('#warnings')).toHaveText(/changed in another tab/);
+      await expect(reopened.locator('#warnings')).toHaveText(/changed in another tab/);
       expect(await savedValue(other, storageKey)).toBe(0);
-      await page.getByRole('button', { name: 'Retry save storage' }).click();
-      await seeColor(page, originalColor);
-      await page.reload();
-      await openCartridges(page);
-      await page.getByRole('button', { name: 'diagnostic.nes', exact: true }).click();
-      await seeColor(page, originalColor);
+      await reopened.getByRole('button', { name: 'Retry save storage' }).click();
+      await seeColor(reopened, originalColor);
+      await reopened.reload();
+      await openCartridges(reopened);
+      await reopened.getByRole('button', { name: 'diagnostic.nes', exact: true }).click();
+      await seeColor(reopened, originalColor);
     } else {
       await expect.poll(() => savedValue(other, storageKey)).toBe(2);
     }
-    await expect(page.locator('#warnings')).toBeHidden();
+    await expect(reopened.locator('#warnings')).toBeHidden();
   });
 }
 

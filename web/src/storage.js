@@ -85,25 +85,72 @@ function encode(bytes) {
   return btoa(String.fromCharCode(...bytes));
 }
 
+function lockDraft(key) {
+  return new Promise((resolve, reject) => {
+    navigator.locks.request(key, { ifAvailable: true }, lock => {
+      if (!lock) return resolve(null);
+      // The browser releases ownership when this document closes or reloads.
+      return new Promise(release => resolve(release));
+    }).catch(reject);
+  });
+}
+
+async function openDraft(id, backup) {
+  if (!navigator.locks) return null;
+  const prefix = draftPrefix + id + '/';
+  // A tab-local backup can replace only its own older recovery copy.
+  const keys = backup ? [backup.key] : Object.keys(localStorage);
+  for (const key of keys) {
+    if (!key?.startsWith(prefix)) continue;
+    const release = await lockDraft(key);
+    if (!release) continue;
+    try {
+      const raw = localStorage.getItem(key);
+      if (raw !== null || backup) return { key, release, raw };
+    } catch (error) {
+      release();
+      throw error;
+    }
+    release();
+  }
+  const key = prefix + crypto.randomUUID();
+  const release = await lockDraft(key);
+  return release ? { key, release, raw: null } : null;
+}
+
+function readDraft(raw) {
+  const draft = JSON.parse(raw);
+  if (draft !== null && (typeof draft.raw !== 'string' ||
+      (draft.base !== null && typeof draft.base !== 'string') ||
+      (draft.key !== undefined && typeof draft.key !== 'string'))) {
+    throw new Error('Battery save recovery data is invalid.');
+  }
+  return draft;
+}
+
 export class BatterySaves {
   #sessions = new Map();
 
   get warning() {
     return Array.from(this.#sessions.values(), session => {
-      const memoryOnly = session.pending && session.pending !== session.staged;
-      if (session.blocked) {
-        const detail = memoryOnly ? ' Progress is held in this tab.' : '';
-        return `The battery save for ${session.name} changed in another tab.${detail} Retry to load the stored version.`;
+      const tabOnly = session.pending && session.pending !== session.staged;
+      let detail = ' Reopen the cartridge to recover progress after reload or tab closure.';
+      if (tabOnly) {
+        detail = session.pending === session.backup
+          ? ' Progress can be recovered by reloading this tab.'
+          : ' Progress is held in this tab.';
       }
-      if (session.writeFailed || memoryOnly) {
-        const detail = memoryOnly ? 'Progress is held in this tab.' : 'Reopen the cartridge in this tab to recover progress after reload.';
-        return `Could not finish saving battery data for ${session.name}. ${detail}`;
+      if (session.blocked) {
+        return `The battery save for ${session.name} changed in another tab.${tabOnly ? detail : ''} Retry to load the stored version.`;
+      }
+      if (session.writeFailed || tabOnly) {
+        return `Could not finish saving battery data for ${session.name}.${detail}`;
       }
       return '';
     }).filter(Boolean).join(' ');
   }
 
-  open(id, name, size, core) {
+  async open(id, name, size, core) {
     if (!size) return null;
     const cached = this.#sessions.get(id);
     if (cached?.pending) {
@@ -111,21 +158,27 @@ export class BatterySaves {
       cached.name = name;
       return cached;
     }
-    const base = localStorage.getItem(savePrefix + id);
-    const storedBytes = decode(base, size);
-    const draft = JSON.parse(sessionStorage.getItem(draftPrefix + id));
-    if (draft !== null && (typeof draft.raw !== 'string' || (draft.base !== null && typeof draft.base !== 'string'))) {
-      throw new Error('Battery save recovery data is invalid.');
+    const backup = readDraft(sessionStorage.getItem(draftPrefix + id));
+    const { key: draftKey, release: releaseDraft, raw } = await openDraft(id, backup) ?? {};
+    try {
+      const base = localStorage.getItem(savePrefix + id);
+      const storedBytes = decode(base, size);
+      const draft = backup ?? readDraft(raw ?? null);
+      const bytes = draft ? decode(draft.raw, size) : storedBytes;
+      if (bytes && !core.restore(bytes, true)) throw new Error('Core rejected battery save.');
+      const blocked = Boolean(draft && base !== draft.base && base !== draft.raw);
+      const session = {
+        id, name, size, revision: 0, pending: draft, staged: backup ? null : draft,
+        draftKey, releaseDraft, backup, base: blocked ? draft.base : base,
+        blocked, writing: null, writeFailed: false,
+      };
+      cached?.releaseDraft?.();
+      this.#sessions.set(id, session);
+      return session;
+    } catch (error) {
+      releaseDraft?.();
+      throw error;
     }
-    const bytes = draft ? decode(draft.raw, size) : storedBytes;
-    if (bytes && !core.restore(bytes, true)) throw new Error('Core rejected battery save.');
-    const blocked = Boolean(draft && base !== draft.base && base !== draft.raw);
-    const session = {
-      id, name, size, revision: 0, pending: draft, staged: draft,
-      base: blocked ? draft.base : base, blocked, writing: null, writeFailed: false,
-    };
-    this.#sessions.set(id, session);
-    return session;
   }
 
   capture(session, core) {
@@ -139,11 +192,23 @@ export class BatterySaves {
   flush(session) {
     if (!session?.pending) return;
     // Save synchronously before queueing a lock, including during pagehide.
-    // Session storage survives reload and keeps each tab's draft separate.
-    if (session.staged !== session.pending) {
+    if (session.draftKey && session.staged !== session.pending) {
       try {
-        sessionStorage.setItem(draftPrefix + session.id, JSON.stringify(session.pending));
+        localStorage.setItem(session.draftKey, JSON.stringify(session.pending));
         session.staged = session.pending;
+        if (session.backup) {
+          sessionStorage.removeItem(draftPrefix + session.id);
+          session.backup = null;
+        }
+      } catch {
+        // Session storage can still preserve progress through a reload.
+      }
+    }
+    if (session.staged !== session.pending && session.backup !== session.pending) {
+      try {
+        const backup = { ...session.pending, key: session.draftKey };
+        sessionStorage.setItem(draftPrefix + session.id, JSON.stringify(backup));
+        session.backup = session.pending;
       } catch {
         // Keep the draft in memory and still attempt the shared save.
       }
@@ -155,8 +220,9 @@ export class BatterySaves {
   }
 
   #clearDraft(session) {
-    if (session.staged) sessionStorage.removeItem(draftPrefix + session.id);
-    session.pending = session.staged = null;
+    if (session.backup) sessionStorage.removeItem(draftPrefix + session.id);
+    if (session.draftKey) localStorage.removeItem(session.draftKey);
+    session.pending = session.staged = session.backup = null;
     session.writeFailed = false;
   }
 
