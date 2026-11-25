@@ -404,7 +404,9 @@ impl Fds {
                 if self.io & 1 == 0 {
                     self.timer.control = 0;
                     self.timer.irq = false;
-                    self.drive.acknowledge_transfer();
+                    // Reset $4025 to stopped, with read mode selected.
+                    self.drive.control = 0x06;
+                    self.drive.rewind();
                 }
             }
             0x4024 if self.io & 1 != 0 => {
@@ -657,6 +659,35 @@ mod tests {
         assert!(restored.restore(fds.save()));
         assert_eq!(restored.save(), fds.save());
         assert_eq!(restored.save()[TRACK_BYTES + 1], 0);
+    }
+
+    #[test]
+    fn disabling_disk_io_stops_writes_and_disk_irqs() {
+        let mut fds = board();
+        let original = fds.save().to_vec();
+        let transfer_cycles = SPINUP_CYCLES + (LEAD_GAP as u32 + 56) * BYTE_CYCLES;
+
+        fds.cpu_write(0x4023, 1);
+        fds.cpu_write(0x4024, 0x5a);
+        fds.cpu_write(0x4025, 0xc1);
+        fds.cpu_write(0x4023, 0);
+        clock(&mut fds, transfer_cycles);
+        assert_eq!(fds.revision(), 0, "disk was written with disk I/O disabled");
+        assert!(!fds.irq());
+        assert_eq!(fds.save(), original);
+
+        // Enabling the registers again still requires an explicit drive start.
+        fds.cpu_write(0x4023, 1);
+        clock(&mut fds, transfer_cycles);
+        assert!(!fds.irq());
+        assert_eq!(fds.cpu_read(0x4032, 0) & 7, 2);
+        assert_eq!(fds.save(), original);
+
+        fds.cpu_write(0x4024, 0xa5);
+        fds.cpu_write(0x4025, 0xc1);
+        clock(&mut fds, SPINUP_CYCLES);
+        assert!(fds.irq());
+        assert_eq!(fds.save()[0], 0xa5);
     }
 
     #[test]
