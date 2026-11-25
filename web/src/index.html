@@ -3,7 +3,7 @@
   <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-    <meta name="description" content="Play locally selected NES cartridges in your browser.">
+    <meta name="description" content="Play local NES cartridges and Famicom Disk System games in your browser.">
     <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self'; connect-src 'self'; img-src 'self' data:; object-src 'none'; base-uri 'none'; form-action 'none'">
     <link rel="icon" href="data:,">
     <title>nes-rust-neo · NES emulator</title>
@@ -25,6 +25,7 @@
                 <dt><kbd>Enter</kbd> / <kbd>Shift</kbd></dt><dd>Start / Select</dd>
               </dl>
               <p>Slide across the touch D-pad for diagonals. Standard gamepads work.</p>
+              <p>Open a local NES cartridge or FDS disk image. FDS games require a local 8 KiB BIOS. Use the disk controls to change sides when the game asks.</p>
             </div>
           </details>
           <a href="https://github.com/takahirox/nes-rust-neo">GitHub</a>
@@ -36,9 +37,18 @@
             <div class="picture">
               <canvas tabindex="0" width="256" height="240" aria-label="NES video output"></canvas>
             </div>
-            <p id="empty">Insert a cartridge</p>
+            <p id="empty">Open a game</p>
+            <div id="disk-controls" role="group" aria-label="Disk drive" hidden>
+              <label>Disk side <select id="disk-side"></select></label>
+              <button id="disk-toggle" type="button">Eject</button>
+              <span id="disk-status" role="status"></span>
+            </div>
           </div>
           <button id="exit-fullscreen" type="button">Exit fullscreen</button>
+          <div id="fullscreen-disk-save" hidden>
+            <p id="fullscreen-disk-warning" role="status"></p>
+            <button id="fullscreen-retry-disk" type="button">Retry save storage</button>
+          </div>
           <div class="touch" role="group" aria-label="On-screen NES controller">
             <div class="left-controls">
               <div id="dpad" class="dpad" role="group" aria-label="Directional pad">
@@ -77,22 +87,29 @@
           </div>
           <p id="status" role="status">Loading emulator…</p>
         </div>
-        <div class="game-entry" role="group" aria-label="Cartridge slot">
+        <div class="game-entry" role="group" aria-label="Game selection">
           <div class="cartridge-value">
-            <span id="cartridge-label">Inserted cartridge</span>
+            <span id="cartridge-label">Current game</span>
             <p id="inserted" title="None">None</p>
           </div>
-          <button id="change-cartridge" type="button" popovertarget="cartridge-picker" aria-haspopup="dialog" disabled>Insert cartridge</button>
+          <button id="change-cartridge" type="button" popovertarget="cartridge-picker" aria-haspopup="dialog" disabled>Open game</button>
           <div id="cartridge-picker" popover role="dialog" aria-labelledby="cartridge-heading">
-            <h2 id="cartridge-heading">Cartridges</h2>
+            <h2 id="cartridge-heading">Open game</h2>
             <p id="library-status" role="status"></p>
             <section id="my-cartridges" aria-labelledby="my-cartridges-heading" hidden>
-              <h3 id="my-cartridges-heading">My cartridges</h3>
+              <h3 id="my-cartridges-heading">My games</h3>
               <ul id="library" role="list"></ul>
             </section>
-            <button id="open-file" type="button" autofocus disabled>Open local ROM…</button>
+            <button id="open-file" type="button" autofocus disabled>Open local game…</button>
+            <div id="bios-options">
+              <p id="bios-required" hidden>Choose a lawfully obtained 8 KiB FDS BIOS (for example, disksys.rom) to open this game.</p>
+              <button id="open-bios" type="button">Choose FDS BIOS…</button>
+              <button id="forget-bios" type="button" hidden>Forget FDS BIOS</button>
+              <button id="cancel-bios" type="button" hidden>Cancel disk load</button>
+            </div>
           </div>
-          <input id="rom" type="file" accept=".nes" aria-label="Open local ROM" hidden>
+          <input id="rom" type="file" accept=".nes,.fds" aria-label="Open local game" hidden>
+          <input id="bios" type="file" aria-label="Choose local FDS BIOS" hidden>
         </div>
       </section>
       <div class="notices">

@@ -19,7 +19,7 @@ function openLibrary() {
     request.onerror = () => reject(request.error);
     request.onblocked = () => {
       blocked = true;
-      reject(new Error('Close other emulator tabs to open the cartridge library.'));
+      reject(new Error('Close other emulator tabs to open the game library.'));
     };
   });
 }
@@ -31,7 +31,7 @@ async function transaction(mode, useStore) {
       const txn = database.transaction('roms', mode);
       const request = useStore(txn.objectStore('roms'));
       txn.oncomplete = () => resolve(request.result);
-      txn.onabort = () => reject(txn.error ?? new Error('Cartridge storage aborted.'));
+      txn.onabort = () => reject(txn.error ?? new Error('Game library storage aborted.'));
     });
   } finally {
     database.close();
@@ -47,7 +47,7 @@ export function remembered(id) {
 }
 
 // Read names and identities without holding every imported ROM in memory.
-export async function listCartridges() {
+export async function listGames() {
   const database = await openLibrary();
   try {
     return await new Promise((resolve, reject) => {
@@ -69,7 +69,7 @@ export async function listCartridges() {
   }
 }
 
-export function removeCartridge(id) {
+export function removeGame(id) {
   return transaction('readwrite', store => store.delete(id));
 }
 
@@ -85,7 +85,7 @@ function encode(bytes) {
   return btoa(String.fromCharCode(...bytes));
 }
 
-function lockDraft(key) {
+export function holdLock(key) {
   return new Promise((resolve, reject) => {
     const request = navigator.locks.request(key, { ifAvailable: true }, lock => {
       if (!lock) return resolve(null);
@@ -108,7 +108,7 @@ function withAbandonedDrafts(id, useDrafts) {
     try {
       for (const key of Object.keys(localStorage)) {
         if (!key.startsWith(prefix)) continue;
-        const release = await lockDraft(key);
+        const release = await holdLock(key);
         if (!release) continue; // A live tab still owns this copy.
         const entry = { key, release };
         drafts.push(entry);
@@ -210,7 +210,7 @@ export class BatterySaves {
       }
       const blocked = Boolean(draft && base !== draft.base && base !== draft.raw);
       const draftKey = navigator.locks ? entry?.key ?? backupKey + '/' + crypto.randomUUID() : undefined;
-      const releaseDraft = entry?.release ?? (draftKey && await lockDraft(draftKey));
+      const releaseDraft = entry?.release ?? (draftKey && await holdLock(draftKey));
       if (entry) entry.release = null;
       const session = {
         id, name, size, revision: 0, pending: draft, staged: entry?.staged,

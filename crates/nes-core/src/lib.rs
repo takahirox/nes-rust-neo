@@ -1,12 +1,20 @@
 //! Platform-independent NTSC NES. A frame returns RGBA pixels and 48 kHz mono audio.
 mod apu;
+mod board;
 mod bus;
 mod cartridge;
 mod cpu;
+mod fds;
+mod fds_audio;
+mod media;
 mod ppu;
 
 pub use cartridge::{Cartridge, Mirroring, RomError};
 pub use cpu::CpuState;
+pub use fds::{Disk, MAX_DISK_SAVE_BYTES};
+pub use media::{FDS_BIOS_BYTES, FDS_SIDE_BYTES, Media, MediaError};
+
+use board::Board;
 
 use bus::Bus;
 use cpu::Cpu;
@@ -34,15 +42,29 @@ pub struct Nes {
 
 impl Nes {
     pub fn from_ines(bytes: &[u8]) -> Result<Self, RomError> {
-        let mut nes = Self {
-            cpu: Cpu::new(),
-            bus: Bus::new(Cartridge::from_ines(bytes)?),
-        };
-        nes.cpu.reset(&mut nes.bus);
-        Ok(nes)
+        Ok(Self::from_board(Board::Cartridge(Box::new(
+            Cartridge::from_ines(bytes)?,
+        ))))
     }
 
-    /// Restart from power-on timing while keeping cartridge RAM, including battery saves.
+    pub fn from_media(media: Media, bios: Option<&[u8]>) -> Result<Self, MediaError> {
+        let board = match media {
+            Media::Cartridge(cart) => Board::Cartridge(cart),
+            Media::Disk(disk) => Board::Disk(Box::new(fds::Fds::new(disk, bios)?)),
+        };
+        Ok(Self::from_board(board))
+    }
+
+    fn from_board(board: Board) -> Self {
+        let mut nes = Self {
+            cpu: Cpu::new(),
+            bus: Bus::new(board),
+        };
+        nes.cpu.reset(&mut nes.bus);
+        nes
+    }
+
+    /// Restart from power-on timing while keeping cartridge RAM and mounted disk contents.
     pub fn reset(&mut self) {
         self.bus.reset();
         self.cpu = Cpu::new();
@@ -92,18 +114,75 @@ impl Nes {
     pub fn ppu_position(&self) -> (u16, u16) {
         self.bus.ppu.position()
     }
-    pub fn cartridge(&self) -> &Cartridge {
-        &self.bus.cart
+    pub fn cartridge(&self) -> Option<&Cartridge> {
+        match &self.bus.board {
+            Board::Cartridge(cart) => Some(cart),
+            Board::Disk(_) => None,
+        }
     }
+
+    pub fn disk_side_count(&self) -> usize {
+        match &self.bus.board {
+            Board::Disk(fds) => fds.side_count(),
+            Board::Cartridge(_) => 0,
+        }
+    }
+
+    pub fn disk_side(&self) -> Option<usize> {
+        match &self.bus.board {
+            Board::Disk(fds) => fds.inserted(),
+            Board::Cartridge(_) => None,
+        }
+    }
+
+    pub fn insert_disk(&mut self, side: usize) -> bool {
+        match &mut self.bus.board {
+            Board::Disk(fds) => fds.insert(side),
+            Board::Cartridge(_) => false,
+        }
+    }
+
+    pub fn eject_disk(&mut self) {
+        if let Board::Disk(fds) = &mut self.bus.board {
+            fds.eject();
+        }
+    }
+
+    /// All writable bytes for the active media, in its hardware-specific format.
+    pub fn save_bytes(&self) -> Option<&[u8]> {
+        match &self.bus.board {
+            Board::Cartridge(cart) => cart.battery_ram(),
+            Board::Disk(fds) => Some(fds.save()),
+        }
+    }
+
+    pub fn save_revision(&self) -> u32 {
+        match &self.bus.board {
+            Board::Cartridge(cart) => cart.save_revision(),
+            Board::Disk(fds) => fds.revision(),
+        }
+    }
+
+    pub fn restore_save(&mut self, bytes: &[u8]) -> bool {
+        match &mut self.bus.board {
+            Board::Cartridge(cart) => cart.restore_battery_ram(bytes),
+            Board::Disk(fds) => fds.restore(bytes),
+        }
+    }
+
     pub fn restore_battery_ram(&mut self, bytes: &[u8]) -> bool {
-        self.bus.cart.restore_battery_ram(bytes)
+        match &mut self.bus.board {
+            Board::Cartridge(cart) => cart.restore_battery_ram(bytes),
+            Board::Disk(_) => false,
+        }
     }
 
     /// Debug RAM peek with no register reads, clocks, or side effects.
     pub fn peek_ram(&self, address: u16) -> Option<u8> {
-        match address {
-            0..=0x1fff => Some(self.bus.ram[usize::from(address & 0x7ff)]),
-            0x6000..=0x7fff => Some(self.bus.cart.ram_at(address)),
+        match (&self.bus.board, address) {
+            (_, 0..=0x1fff) => Some(self.bus.ram[usize::from(address & 0x7ff)]),
+            (Board::Cartridge(cart), 0x6000..=0x7fff) => Some(cart.ram_at(address)),
+            (Board::Disk(fds), 0x6000..=0xdfff) => Some(fds.prg[usize::from(address - 0x6000)]),
             _ => None,
         }
     }
