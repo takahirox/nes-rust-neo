@@ -615,7 +615,7 @@ for (const competingSave of [false, true]) {
   });
 }
 
-test('closing two queued writers keeps both recovery copies until a version is chosen', async ({ page, context }) => {
+async function abandonQueuedSaves(page, context, { distinct }) {
   const lockTab = await context.newPage();
   const second = await context.newPage();
   await coreReady(lockTab);
@@ -641,21 +641,50 @@ test('closing two queued writers keeps both recovery copies until a version is c
       await writer.locator('canvas').focus();
       await key(writer, 'ArrowRight', [100, 176, 255]);
       await key(writer, 'x', secondPressColor);
-      if (writer === second) {
+      if (distinct && writer === second) {
         await key(writer, 'ArrowRight', [100, 176, 255]);
         await key(writer, 'x', thirdPressColor);
       }
       await writer.getByRole('button', { name: 'Pause', exact: true }).click();
     }
     await expect.poll(() => queuedSaveWrites(lockTab, storageKey)).toBe(2);
-    await expect.poll(drafts).toEqual([2, 3]);
+    await expect.poll(drafts).toEqual(distinct ? [2, 3] : [2, 2]);
     await page.close();
     await second.close();
     await expect.poll(() => queuedSaveWrites(lockTab, storageKey)).toBe(0);
   } finally {
     await lockTab.evaluate(() => window.releaseSaveLock());
   }
+  return { lockTab, storageKey, drafts };
+}
 
+test('identical abandoned battery drafts do not override later progress', async ({ page, context }) => {
+  const { lockTab, storageKey, drafts } = await abandonQueuedSaves(page, context, { distinct: false });
+  const recovered = await context.newPage();
+  await coreReady(recovered);
+  await openCartridges(recovered);
+  await recovered.getByRole('button', { name: 'diagnostic.nes', exact: true }).click();
+  await seeColor(recovered, secondPressColor);
+  await expect.poll(() => savedValue(lockTab, storageKey)).toBe(2);
+  await expect(recovered.locator('#warnings')).toBeHidden();
+
+  await key(recovered, 'ArrowRight', [100, 176, 255]);
+  await key(recovered, 'x', thirdPressColor);
+  await expect.poll(() => savedValue(lockTab, storageKey)).toBe(3);
+  await recovered.close();
+
+  const reopened = await context.newPage();
+  await coreReady(reopened);
+  await openCartridges(reopened);
+  await reopened.getByRole('button', { name: 'diagnostic.nes', exact: true }).click();
+  await seeColor(reopened, thirdPressColor);
+  await expect(reopened.locator('#warnings')).toBeHidden();
+  expect(await savedValue(lockTab, storageKey)).toBe(3);
+  expect(await drafts()).toEqual([]);
+});
+
+test('closing two queued writers keeps both recovery copies until a version is chosen', async ({ page, context }) => {
+  const { lockTab, storageKey, drafts } = await abandonQueuedSaves(page, context, { distinct: true });
   const reopened = await context.newPage();
   await coreReady(lockTab);
   await coreReady(reopened);

@@ -294,6 +294,10 @@ export class BatterySaves {
           }
           if (stored !== raw) localStorage.setItem(key, raw);
           session.base = raw;
+          // Retire redundant abandoned copies before the shared save advances again.
+          for (const { key: draftKey, draft } of drafts) {
+            if (draft && (draft.raw === raw || draft.raw === stored)) localStorage.removeItem(draftKey);
+          }
           this.#clearDraft(session);
         }));
       }
