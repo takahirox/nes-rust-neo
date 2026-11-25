@@ -1,0 +1,463 @@
+import { loadCore } from './wasm.js';
+import { Sound } from './audio.js';
+import { controls } from './controls.js';
+import {
+  BatterySaves, identify, listCartridges, preferencesKey, remember, remembered, removeCartridge,
+} from './storage.js';
+
+const get = id => document.getElementById(id);
+const presentation = get('game-presentation');
+const screen = get('screen');
+const canvas = screen.querySelector('canvas');
+const context = canvas.getContext('2d', { alpha: false });
+const image = context.createImageData(256, 240);
+const picker = get('rom');
+const cartridgePicker = get('cartridge-picker');
+const cartridgeButton = get('change-cartridge');
+const library = get('library');
+const play = get('play');
+const help = get('help');
+const prefs = { scale: '3', display: 'crt', volume: 100, muted: false };
+const sound = new Sound();
+const saves = new BatterySaves();
+const warnings = new Map();
+const frameMs = 1000 / 60.0988;
+let core;
+let active;
+let pendingCartridge;
+let running = false;
+let busy = false;
+let previous;
+let budget = 0;
+let lastSave = 0;
+
+function notice(message) {
+  get('status').textContent = message;
+}
+
+function warn(category, message) {
+  if (message) warnings.set(category, message);
+  else warnings.delete(category);
+  const saveWarning = saves.warning;
+  const parts = [...warnings.values(), saveWarning].filter(Boolean);
+  const text = parts.join(' ');
+  if (get('warnings').textContent !== text) get('warnings').textContent = text;
+  get('warnings').hidden = parts.length === 0;
+  get('retry-save').hidden = Boolean(pendingCartridge?.conflict) || (!pendingCartridge && !saveWarning);
+}
+
+function soundError(error) {
+  warn('audio', `Audio is unavailable (${error.message}).`);
+}
+
+function unlockAudio() {
+  if (!document.hidden && !prefs.muted && !sound.active) {
+    sound.unlock().then(() => {
+      warn('audio', '');
+      if (document.hidden) return sound.suspend();
+    }).catch(soundError);
+  }
+}
+
+function enabled() {
+  return Boolean(active && running && !busy && !document.hidden);
+}
+const pads = controls(document.querySelector('.touch'), enabled, unlockAudio);
+
+function syncUI() {
+  play.textContent = running ? 'Pause' : 'Play';
+  play.disabled = !active || busy;
+  get('reset').disabled = !active || busy;
+  cartridgeButton.disabled = !core;
+  get('open-file').disabled = !core || busy;
+  get('retry-save').disabled = busy;
+  get('save-choices').disabled = busy;
+  for (const button of library.querySelectorAll('button')) button.disabled = busy;
+  pads.setEnabled(enabled());
+}
+
+async function flushSave() {
+  saves.capture(active?.save, core);
+  const writing = saves.flush(active?.save);
+  warn('save', '');
+  if (writing) {
+    await writing;
+    warn('save', '');
+  }
+}
+
+function updateScanlines(height) {
+  const ratio = Math.min(window.devicePixelRatio || 1, 2);
+  const samplesPerRow = Math.round(height * ratio) / canvas.height;
+  const strength = Math.max(0, Math.min(1, samplesPerRow - 1.5));
+  screen.style.setProperty('--scanline-height', `${height / canvas.height}px`);
+  screen.style.setProperty('--scanline-opacity', String(strength * .07));
+}
+
+// Fade the scanlines at small output sizes, as in the SNES reference.
+const picture = canvas.parentElement;
+new ResizeObserver(([entry]) => updateScanlines(entry.contentRect.height)).observe(picture);
+window.addEventListener('resize', () => updateScanlines(picture.getBoundingClientRect().height));
+
+function applyPreferences() {
+  screen.dataset.scale = get('scale').value = prefs.scale;
+  screen.dataset.display = get('display').value = prefs.display;
+  const volume = prefs.muted ? 0 : prefs.volume;
+  get('volume').value = volume;
+  get('volume').setAttribute('aria-valuetext', volume ? `${volume}%` : '0% (muted)');
+  get('mute').setAttribute('aria-pressed', String(prefs.muted));
+  get('mute').textContent = prefs.muted ? 'Unmute' : 'Mute';
+  sound.settings(prefs.volume / 100, prefs.muted);
+}
+
+try {
+  const stored = JSON.parse(localStorage.getItem(preferencesKey));
+  if (stored) {
+    if (['fit', '1', '2', '3'].includes(stored.scale)) prefs.scale = stored.scale;
+    if (['pixel', 'crt'].includes(stored.display)) prefs.display = stored.display;
+    if (Number.isFinite(stored.volume) && stored.volume > 0) prefs.volume = Math.min(100, stored.volume);
+    prefs.muted = stored.muted === true || stored.volume === 0;
+  }
+} catch {
+  warn('preferences', 'Could not read preferences from browser storage.');
+}
+applyPreferences();
+
+function storePreferences() {
+  applyPreferences();
+  try {
+    localStorage.setItem(preferencesKey, JSON.stringify(prefs));
+    warn('preferences', '');
+  } catch {
+    warn('preferences', 'Could not save preferences in this browser.');
+  }
+}
+
+async function refreshLibrary() {
+  try {
+    const cartridges = await listCartridges();
+    const nameCounts = new Map();
+    for (const { name } of cartridges) nameCounts.set(name, (nameCounts.get(name) ?? 0) + 1);
+    const rows = cartridges.map(({ id, name }, index) => {
+      const row = document.createElement('li');
+      const open = document.createElement('button');
+      open.textContent = name;
+      open.type = 'button';
+      open.onclick = () => {
+        unlockAudio();
+        operate(async () => {
+          const record = await remembered(id);
+          if (!record) throw new Error('This ROM is missing from local storage.');
+          if (await identify(record.bytes) !== id) throw new Error('The remembered ROM no longer matches its identity.');
+          await insert(record);
+        });
+      };
+      const remove = document.createElement('button');
+      remove.textContent = 'Remove';
+      remove.type = 'button';
+      remove.className = 'remove-cartridge';
+      remove.setAttribute('aria-label', `Remove ${name}`);
+      remove.onclick = () => operate(async () => {
+        await removeCartridge(id);
+        await refreshLibrary();
+        get('library-status').textContent = `Removed ${name} from this browser’s list.`;
+      });
+      if (nameCounts.get(name) > 1) {
+        const hash = document.createElement('small');
+        hash.id = `rom-hash-${index}`;
+        hash.textContent = id.slice(0, 12);
+        open.setAttribute('aria-label', name);
+        open.setAttribute('aria-describedby', hash.id);
+        remove.setAttribute('aria-describedby', hash.id);
+        open.append(hash);
+      }
+      row.append(open, remove);
+      return row;
+    });
+    library.replaceChildren(...rows);
+    get('my-cartridges').hidden = rows.length === 0;
+    warn('library', '');
+    syncUI();
+  } catch {
+    warn('library', 'The remembered cartridge list is unavailable.');
+  }
+}
+
+function clearTransient() {
+  pads.clear();
+  sound.clear();
+  previous = undefined;
+  budget = 0;
+}
+
+async function operate(operation) {
+  if (busy || !core) return;
+  busy = true;
+  get('library-status').textContent = '';
+  clearTransient();
+  syncUI();
+  try {
+    await operation();
+  } catch (error) {
+    if (cartridgePicker.matches(':popover-open')) get('library-status').textContent = error.message;
+    else notice(error.message);
+  } finally {
+    busy = false;
+    syncUI();
+    if (cartridgePicker.matches(':popover-open')) {
+      if (!cartridgePicker.contains(document.activeElement)) get('open-file').focus({ preventScroll: true });
+    } else if (pendingCartridge?.conflict) {
+      get('save-versions').querySelector('button').focus({ preventScroll: true });
+    } else if (active && running && !document.hidden && !help.open) {
+      canvas.focus({ preventScroll: true });
+    }
+  }
+}
+
+function showSaveChoices(record, rememberImport, conflict) {
+  const options = get('save-versions');
+  options.replaceChildren();
+  get('save-choices').hidden = !conflict;
+  if (!conflict) return;
+  const addChoice = (label, raw) => {
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.textContent = label;
+    button.onclick = () => {
+      unlockAudio();
+      operate(() => insert(record, rememberImport, { conflict, raw }));
+    };
+    options.append(button);
+  };
+  conflict.versions.forEach(({ raw, savedAt }, index) => {
+    const date = savedAt ? ` (${new Date(savedAt).toLocaleString()})` : '';
+    addChoice(`Use recovery copy ${index + 1}${date}`, raw);
+  });
+  addChoice(conflict.base === null ? 'Start without a save' : 'Use the stored save', conflict.base);
+}
+
+async function insert(record, rememberImport = false, selection) {
+  const { bytes, id, name } = record;
+  const size = core.prepare(new Uint8Array(bytes));
+  await flushSave();
+  let save;
+  try {
+    save = await saves.open(id, name, size, core, selection);
+  } catch {
+    pendingCartridge = { record, rememberImport };
+    showSaveChoices();
+    cartridgePicker.hidePopover();
+    warn('restore', `Could not restore the battery save for ${name}. Existing data is protected.`);
+    return;
+  }
+  if (save?.conflict) {
+    pendingCartridge = { record, rememberImport, conflict: save.conflict };
+    cartridgePicker.hidePopover();
+    showSaveChoices(record, rememberImport, save.conflict);
+    const reason = selection ? `The available save versions for ${name} changed.` : `Multiple recovery copies exist for ${name}.`;
+    warn('restore', `${reason} Choose the version to keep. This removes the other copies.`);
+    return;
+  }
+  core.activate();
+  if (save) save.revision = core.saveRevision();
+  pendingCartridge = undefined;
+  showSaveChoices();
+  active = { name, save };
+  running = true;
+  budget = frameMs;
+  get('empty').hidden = true;
+  get('inserted').textContent = name;
+  get('inserted').title = name;
+  cartridgeButton.textContent = 'Change cartridge';
+  cartridgePicker.hidePopover();
+  notice('');
+  warn('restore', '');
+  if (rememberImport) {
+    try {
+      await remember(record);
+      await refreshLibrary();
+    } catch {
+      warn('library', 'This cartridge could not be remembered. It can still be played.');
+    }
+  }
+}
+
+function openPicker() {
+  unlockAudio();
+  cartridgePicker.hidePopover();
+  picker.value = '';
+  picker.click();
+}
+
+get('open-file').onclick = openPicker;
+cartridgePicker.addEventListener('beforetoggle', event => {
+  if (event.newState === 'open') {
+    pads.clear();
+    get('library-status').textContent = warnings.get('library') || '';
+  }
+});
+picker.addEventListener('cancel', () => {
+  notice('File selection cancelled.');
+  if (active) canvas.focus({ preventScroll: true });
+});
+picker.addEventListener('change', () => {
+  const [file] = picker.files;
+  picker.value = '';
+  if (!file) return;
+  operate(async () => {
+    if (file.size > 8 * 1024 * 1024) throw new Error('ROM file is too large (maximum 8 MiB).');
+    const bytes = await file.arrayBuffer();
+    const id = await identify(bytes);
+    await insert({ id, name: file.name, bytes }, true);
+  });
+});
+
+play.onclick = () => {
+  if (!active || busy) return;
+  running = !running;
+  clearTransient();
+  if (running) {
+    unlockAudio();
+    canvas.focus({ preventScroll: true });
+  } else {
+    flushSave();
+  }
+  syncUI();
+};
+function restart() {
+  clearTransient();
+  core.reset();
+  if (core.runFrame(0, 0)) core.draw(context, image);
+  else {
+    running = false;
+    notice('The cartridge stopped on a CPU jam.');
+  }
+  if (running) canvas.focus({ preventScroll: true });
+  syncUI();
+}
+get('reset').onclick = () => {
+  if (!active || busy) return;
+  flushSave();
+  restart();
+};
+get('retry-save').onclick = () => {
+  if (pendingCartridge) unlockAudio();
+  operate(async () => {
+    if (pendingCartridge) {
+      const { record, rememberImport } = pendingCartridge;
+      await insert(record, rememberImport);
+      return;
+    }
+    await flushSave();
+    if (await saves.retry(active?.save, core)) {
+      restart();
+      if (running) notice('Battery save restored. Cartridge restarted.');
+    }
+    warn('save', '');
+  });
+};
+help.addEventListener('toggle', () => {
+  if (help.open) pads.clear();
+});
+help.addEventListener('keydown', event => {
+  if (event.key === 'Escape' && help.open) {
+    event.preventDefault();
+    help.open = false;
+    help.querySelector('summary').focus();
+  }
+});
+help.addEventListener('focusout', event => {
+  if (!help.contains(event.relatedTarget)) help.open = false;
+});
+document.addEventListener('pointerdown', event => {
+  if (help.open && !help.contains(event.target)) help.open = false;
+});
+get('mute').onclick = () => {
+  prefs.muted = !prefs.muted;
+  storePreferences();
+  if (!prefs.muted) unlockAudio();
+};
+get('volume').oninput = event => {
+  const volume = Number(event.target.value);
+  prefs.muted = volume === 0;
+  if (volume) prefs.volume = volume;
+  storePreferences();
+  if (volume) unlockAudio();
+};
+get('scale').onchange = event => { prefs.scale = event.target.value; storePreferences(); };
+get('display').onchange = event => { prefs.display = event.target.value; storePreferences(); };
+
+const fullscreen = get('fullscreen');
+const playerChrome = document.querySelectorAll('header, .toolbar, .game-entry, .notices');
+let fullscreenFromKeyboard = false;
+fullscreen.onclick = async event => {
+  fullscreenFromKeyboard = event.detail === 0;
+  try {
+    await presentation.requestFullscreen();
+  } catch {
+    notice('Fullscreen is unavailable in this browser.');
+  }
+};
+get('exit-fullscreen').onclick = () => document.exitFullscreen().catch(() => notice('Could not leave fullscreen.'));
+document.addEventListener('fullscreenchange', () => {
+  const expanded = document.fullscreenElement === presentation;
+  for (const element of playerChrome) element.inert = expanded;
+  pads.clear();
+  if (expanded) {
+    const target = active ? canvas : get('exit-fullscreen');
+    target.focus({ preventScroll: true });
+  } else if (fullscreenFromKeyboard || !active) {
+    fullscreen.focus({ preventScroll: true });
+  } else {
+    canvas.focus({ preventScroll: true });
+  }
+});
+document.addEventListener('visibilitychange', () => {
+  clearTransient();
+  flushSave();
+  if (document.hidden) sound.suspend().catch(soundError);
+  else if (running) sound.resume().catch(soundError);
+  syncUI();
+});
+window.addEventListener('pagehide', () => {
+  clearTransient();
+  flushSave();
+});
+
+function animate(now) {
+  if (enabled()) {
+    if (previous !== undefined) budget = Math.min(5 * frameMs, budget + now - previous);
+    previous = now;
+    const input = pads.sample();
+    let drew = false;
+    while (budget >= frameMs) {
+      budget -= frameMs;
+      if (!core.runFrame(...input)) {
+        running = false;
+        clearTransient();
+        flushSave();
+        notice('The cartridge stopped on a CPU jam.');
+        syncUI();
+        break;
+      }
+      sound.queue(core.audio());
+      drew = true;
+    }
+    if (drew) core.draw(context, image);
+    if (now - lastSave >= 500) {
+      flushSave();
+      lastSave = now;
+    }
+  }
+  requestAnimationFrame(animate);
+}
+
+try {
+  core = await loadCore();
+  syncUI();
+  notice('');
+  requestAnimationFrame(animate);
+  await refreshLibrary();
+} catch (error) {
+  notice(`Could not start the emulator. ${error.message}`);
+}
