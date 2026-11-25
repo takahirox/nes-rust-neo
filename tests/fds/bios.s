@@ -156,23 +156,32 @@ read_header:
     rts
 
 ; Rewrite block 1 with its existing metadata and the updated relay byte.
-; Wait for each zero cell in the lead gap, then emit sync, payload and CRC.
+; The fixture has a 3537-cell lead gap and transfers a cell every 150 CPU cycles.
+; Time the gap from drive ready with the timer IRQ masked. Leave 90 cycles for
+; polling and register writes so the sync byte lands immediately after the gap.
+gap_periods = 9
+gap_reload = (3537 * 150 - 90) / gap_periods - 1
 write_header:
     lda #1
     sta $4025
-    ldx #<3537
-    ldy #>3537
+@ready:
+    lda $4032
+    and #2
+    bne @ready
+    lda #<gap_reload
+    sta $4020
+    lda #>gap_reload
+    sta $4021
+    lda #3
+    sta $4022
+    ldx #gap_periods
 @gap:
-    jsr wait_write
-    lda #0
-    sta $4024
+    lda $4030
+    and #1
+    beq @gap
     dex
     bne @gap
-    cpy #0
-    beq @sync
-    dey
-    jmp @gap
-@sync:
+    stx $4022
     lda #$80
     sta $4024
     lda #$41
