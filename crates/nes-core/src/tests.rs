@@ -128,6 +128,51 @@ fn mmc1_serial_and_ram_protection() {
 }
 
 #[test]
+fn mmc1_surom_selects_512k_prg_half_with_chr_bit() {
+    assert!(matches!(
+        Cartridge::from_ines(&rom(1, 32, 2, 0)),
+        Err(RomError::Layout(1))
+    ));
+    let mut bytes = rom(1, 32, 0, 2);
+    for bank in 0..32 {
+        bytes[16 + bank * 16384] = bank as u8;
+    }
+    let mut cart = Cartridge::from_ines(&bytes).unwrap();
+    let mut cycle = 0;
+    let mut serial = |cart: &mut Cartridge, addr: u16, data: u8| {
+        for shift in 0..5 {
+            cycle += 2;
+            cart.cpu_write(addr, (data >> shift) & 1, cycle);
+        }
+    };
+    assert_eq!(
+        (cart.cpu_read(0x8000, 0), cart.cpu_read(0xc000, 0)),
+        (0, 15)
+    );
+    serial(&mut cart, 0xe000, 3);
+    serial(&mut cart, 0xa000, 0x10);
+    assert_eq!(
+        (cart.cpu_read(0x8000, 0), cart.cpu_read(0xc000, 0)),
+        (19, 31)
+    );
+    serial(&mut cart, 0x8000, 0x08);
+    assert_eq!(
+        (cart.cpu_read(0x8000, 0), cart.cpu_read(0xc000, 0)),
+        (16, 19)
+    );
+    serial(&mut cart, 0x8000, 0x00);
+    serial(&mut cart, 0xe000, 4);
+    assert_eq!(
+        (cart.cpu_read(0x8000, 0), cart.cpu_read(0xc000, 0)),
+        (20, 21)
+    );
+    serial(&mut cart, 0xa000, 0);
+    assert_eq!(cart.cpu_read(0x8000, 0), 4);
+    cart.chr_write(0x1234, 6);
+    assert_eq!(cart.chr_read(0x1234), 6);
+}
+
+#[test]
 fn mmc3_banking_mirroring_and_scanline_irq() {
     let mut bytes = rom(4, 4, 2, 0);
     for bank in 0..8 {

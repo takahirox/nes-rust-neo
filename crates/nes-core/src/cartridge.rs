@@ -100,7 +100,8 @@ impl Cartridge {
         let (prg, chr) = (usize::from(rom[4]), usize::from(rom[5]));
         let valid = match number {
             0 => (1..=2).contains(&prg) && chr <= 1,
-            1 => (1..=16).contains(&prg) && chr <= 16,
+            // SUROM uses CHR bank bit 4 as PRG A18, so 512 KiB needs 8 KiB CHR.
+            1 => ((1..=16).contains(&prg) && chr <= 16) || (prg == 32 && chr <= 1),
             2 => (2..=16).contains(&prg) && chr <= 1,
             3 => (1..=2).contains(&prg) && (1..=4).contains(&chr),
             4 => (2..=32).contains(&prg) && chr <= 32,
@@ -231,7 +232,15 @@ impl Cartridge {
             Mapper::Uxrom(bank) => {
                 (if upper { banks - 1 } else { usize::from(bank) }) * 16384 + (offset & 0x3fff)
             }
-            Mapper::Mmc1 { prg, control, .. } => {
+            Mapper::Mmc1 {
+                prg, control, chr, ..
+            } => {
+                // SUROM: CHR bank 0 bit 4 selects the 256 KiB PRG half.
+                let outer = if banks > 16 {
+                    usize::from(chr[0] & 0x10)
+                } else {
+                    0
+                };
                 let bank = usize::from(prg & 15);
                 let bank = match (control >> 2) & 3 {
                     0 | 1 => (bank & !1) + usize::from(upper),
@@ -244,13 +253,13 @@ impl Cartridge {
                     }
                     _ => {
                         if upper {
-                            banks - 1
+                            banks.min(16) - 1
                         } else {
                             bank
                         }
                     }
                 };
-                bank * 16384 + (offset & 0x3fff)
+                (outer | bank) * 16384 + (offset & 0x3fff)
             }
             Mapper::Mmc3(ref m) => {
                 let last = self.prg.len() / 8192 - 1;

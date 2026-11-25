@@ -71,7 +71,7 @@ The core supports standard NTSC iNES cartridges. It emulates Ricoh 2A03 CPU inst
 | Mapper | Implemented layout | Evidence |
 | --- | --- | --- |
 | 0 | NROM with 16/32 KiB PRG and CHR ROM or RAM | Orbit Salvage and hardware diagnostic |
-| 1 | MMC1 with up to 256 KiB PRG, banking, mirroring and up to 8 KiB PRG RAM | Native bank and write timing tests |
+| 1 | MMC1 with up to 256 KiB PRG (512 KiB SUROM with 8 KiB CHR), banking, mirroring and up to 8 KiB PRG RAM | Native bank and write timing tests |
 | 2 | UxROM with up to 256 KiB PRG, fixed upper bank and banked lower PRG | Native bank tests |
 | 3 | CNROM with up to 32 KiB CHR ROM and discrete bus conflicts | Breakwater and native bank tests |
 | 4 | MMC3 with standard PRG/CHR banks, PRG RAM protection and scanline IRQ | Native bank tests and IRQ diagnostic ROM |
