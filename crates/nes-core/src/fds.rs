@@ -10,6 +10,8 @@ const SPINUP_CYCLES: u32 = 50_000;
 const CHANGE_CYCLES: u32 = 150_000;
 const LEAD_GAP: usize = 3537;
 const BLOCK_GAP: usize = 121;
+const MIN_LEAD_GAP: usize = 26_150usize.div_ceil(8);
+const MIN_BLOCK_GAP: usize = 480 / 8;
 const TRACK_BYTES: usize = 98_304;
 pub const MAX_DISK_SAVE_BYTES: usize = 255 * TRACK_BYTES;
 
@@ -21,21 +23,12 @@ fn crc_byte(mut crc: u16, value: u8) -> u16 {
     crc
 }
 
-fn append_block(
-    track: &mut Vec<u8>,
-    block: &[u8],
-    gap: usize,
-    side: usize,
-) -> Result<(), MediaError> {
-    if track.len() + gap + block.len() + 3 > TRACK_BYTES {
-        return Err(MediaError::DiskCapacity(side));
-    }
+fn append_block(track: &mut Vec<u8>, block: &[u8], gap: usize) {
     track.resize(track.len() + gap, 0);
     track.push(0x80);
     track.extend_from_slice(block);
     let crc = block.iter().copied().fold(crc_byte(0, 0x80), crc_byte);
     track.extend_from_slice(&crc.to_le_bytes());
-    Ok(())
 }
 
 fn expand_side(track: &mut Vec<u8>, raw: &[u8], side: usize) -> Result<(), MediaError> {
@@ -43,8 +36,7 @@ fn expand_side(track: &mut Vec<u8>, raw: &[u8], side: usize) -> Result<(), Media
     if !raw.starts_with(DISK_SIGNATURE) || raw[56] != 2 {
         return Err(malformed());
     }
-    append_block(track, &raw[..56], LEAD_GAP, side)?;
-    append_block(track, &raw[56..58], BLOCK_GAP, side)?;
+    let mut blocks = vec![&raw[..56], &raw[56..58]];
     let mut rest = &raw[58..];
     let mut files = 0;
     // Hidden files can follow the advertised file count.
@@ -55,13 +47,27 @@ fn expand_side(track: &mut Vec<u8>, raw: &[u8], side: usize) -> Result<(), Media
         if data[0] != 4 || file[15] > 2 {
             return Err(malformed());
         }
-        append_block(track, file, BLOCK_GAP, side)?;
-        append_block(track, data, BLOCK_GAP, side)?;
+        blocks.extend([file, data]);
         rest = &rest[17 + length..];
         files += 1;
     }
     if files < usize::from(raw[57]) || rest.iter().any(|&byte| byte != 0) {
         return Err(malformed());
+    }
+
+    // Each block needs a sync byte and two CRC bytes in addition to its data.
+    let block_bytes = raw.len() - rest.len() + 3 * blocks.len();
+    let fits = |lead, between| block_bytes + lead + (blocks.len() - 1) * between <= TRACK_BYTES;
+    // Retain the existing layout for sides that already fit, including saved tracks.
+    let (lead, between) = if fits(LEAD_GAP, BLOCK_GAP) {
+        (LEAD_GAP, BLOCK_GAP)
+    } else if fits(MIN_LEAD_GAP, MIN_BLOCK_GAP) {
+        (MIN_LEAD_GAP, MIN_BLOCK_GAP)
+    } else {
+        return Err(MediaError::DiskCapacity(side));
+    };
+    for (index, block) in blocks.into_iter().enumerate() {
+        append_block(track, block, if index == 0 { lead } else { between });
     }
     track.resize(TRACK_BYTES, 0);
     Ok(())
@@ -190,11 +196,8 @@ impl Drive {
     }
 
     fn write_cell(&mut self) -> u8 {
-        if self.control & 0x40 == 0 {
+        if self.writing_gap() {
             self.crc = 0;
-            if self.control & 0x10 == 0 {
-                self.complete_transfer();
-            }
             0
         } else if self.control & 0x10 != 0 {
             let value = self.crc as u8;
@@ -205,6 +208,10 @@ impl Drive {
             self.crc = crc_byte(self.crc, self.output);
             self.output
         }
+    }
+
+    fn writing_gap(&self) -> bool {
+        self.control & 0x44 == 0
     }
 
     fn complete_transfer(&mut self) {
@@ -343,7 +350,7 @@ impl Fds {
             if self.drive.head == TRACK_BYTES {
                 self.drive.control &= !1;
                 self.drive.ready = false;
-                self.drive.irq |= self.drive.control & 0x80 != 0;
+                self.drive.irq |= !self.drive.writing_gap() && self.drive.control & 0x80 != 0;
             }
         }
         if self.io & 2 != 0 {
@@ -427,6 +434,9 @@ impl Fds {
                 }
                 self.drive.control = value;
                 self.drive.irq = false;
+                if self.drive.writing_gap() {
+                    self.drive.transfer = false;
+                }
             }
             0x4026 if self.io & 1 != 0 => self.external = value,
             0x4040..=0x408a if self.io & 2 != 0 => self.audio.write(addr, value),
@@ -509,6 +519,43 @@ mod tests {
             Nes::from_media(Media::parse(&raw).unwrap(), Some(&[0; 8191])),
             Err(MediaError::BiosSize)
         ));
+    }
+
+    #[test]
+    fn dense_disk_sides_preserve_every_block_and_crc() {
+        let mut blocks = vec![side()[..56].to_vec(), vec![2, 150]];
+        for file in 0..150u8 {
+            let length = if file == 149 { 461u16 } else { 419 };
+            let mut header = vec![0; 16];
+            header[0] = 3;
+            header[1] = file;
+            header[13..15].copy_from_slice(&length.to_le_bytes());
+            let mut data = vec![file; usize::from(length) + 1];
+            data[0] = 4;
+            blocks.extend([header, data]);
+        }
+        let raw: Vec<_> = blocks.iter().flatten().copied().collect();
+        assert_eq!(raw.len(), FDS_SIDE_BYTES);
+        let mut image = b"FDS\x1a\x01".to_vec();
+        image.resize(16, 0);
+        image.extend_from_slice(&raw);
+        for bytes in [&raw, &image] {
+            let Media::Disk(disk) = Media::parse(bytes).unwrap() else {
+                panic!("expected FDS");
+            };
+            assert_eq!(disk.tracks.len(), TRACK_BYTES);
+            let mut track = disk.tracks.as_slice();
+            for (index, block) in blocks.iter().enumerate() {
+                let gap = track.iter().position(|&byte| byte != 0).unwrap();
+                assert!(gap >= if index == 0 { 3269 } else { 60 });
+                let (cell, rest) = track[gap..].split_at(block.len() + 3);
+                assert_eq!(cell[0], 0x80);
+                assert_eq!(&cell[1..1 + block.len()], block);
+                assert_eq!(cell.iter().copied().fold(0, crc_byte), 0);
+                track = rest;
+            }
+            assert!(track.iter().all(|&byte| byte == 0));
+        }
     }
 
     #[test]
@@ -722,6 +769,33 @@ mod tests {
         assert!(restored.restore(fds.save()));
         assert_eq!(restored.save(), fds.save());
         assert_eq!(restored.save()[TRACK_BYTES + 1], 0);
+    }
+
+    #[test]
+    fn writing_gap_does_not_raise_the_byte_transfer_flag_or_irq() {
+        let mut fds = board();
+        fds.disk.tracks[..3].fill(0xff);
+        fds.cpu_write(0x4023, 1);
+        fds.cpu_write(0x4024, 0x80);
+        fds.cpu_write(0x4025, 0xa1);
+        clock(&mut fds, SPINUP_CYCLES + BYTE_CYCLES);
+        assert_eq!(fds.cpu_read(0x4030, 0) & 0x80, 0);
+        assert!(!fds.irq());
+        assert_eq!(&fds.save()[..3], &[0, 0, 0xff]);
+
+        fds.cpu_write(0x4025, 0xe1);
+        clock(&mut fds, BYTE_CYCLES);
+        assert_eq!(fds.cpu_read(0x4030, 0) & 0x80, 0x80);
+        assert!(fds.irq());
+        assert_eq!(fds.save()[2], 0x80);
+
+        fds.cpu_write(0x4025, 0xa1);
+        assert_eq!(fds.cpu_read(0x4030, 0) & 0x80, 0);
+        assert!(!fds.irq());
+        fds.drive.head = TRACK_BYTES - 1;
+        clock(&mut fds, BYTE_CYCLES);
+        assert_eq!(fds.cpu_read(0x4030, 0) & 0xc0, 0x40);
+        assert!(!fds.irq());
     }
 
     #[test]
