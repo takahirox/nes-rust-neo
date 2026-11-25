@@ -13,7 +13,6 @@ pub enum MediaError {
     DiskHeader,
     DiskSize,
     DiskSide(usize),
-    DiskCapacity(usize),
     MissingBios,
     BiosSize,
     Unsupported,
@@ -26,11 +25,6 @@ impl fmt::Display for MediaError {
             Self::DiskHeader => write!(f, "Invalid FDS header (side count or reserved bytes)."),
             Self::DiskSize => write!(f, "FDS image size does not match its 65,500-byte sides."),
             Self::DiskSide(side) => write!(f, "Malformed FDS blocks on side {}.", side + 1),
-            Self::DiskCapacity(side) => write!(
-                f,
-                "FDS side {} exceeds the emulated track capacity.",
-                side + 1
-            ),
             Self::MissingBios => write!(f, "An 8 KiB FDS BIOS is required for this disk image."),
             Self::BiosSize => write!(f, "The FDS BIOS must be exactly 8192 bytes (8 KiB)."),
             Self::Unsupported => write!(

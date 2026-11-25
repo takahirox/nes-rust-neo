@@ -1,3 +1,5 @@
+use std::ops::Range;
+
 use crate::{
     Mirroring,
     fds_audio::FdsAudio,
@@ -12,8 +14,13 @@ const LEAD_GAP: usize = 3537;
 const BLOCK_GAP: usize = 121;
 const MIN_LEAD_GAP: usize = 26_150usize.div_ceil(8);
 const MIN_BLOCK_GAP: usize = 480 / 8;
-const TRACK_BYTES: usize = 98_304;
-pub const MAX_DISK_SAVE_BYTES: usize = 255 * TRACK_BYTES;
+const BASE_TRACK_BYTES: usize = 98_304;
+// Two side headers occupy 58 bytes. Each file pair (including hidden files)
+// takes at least 17 bytes even with an empty payload.
+const MAX_SIDE_BLOCKS: usize = 2 + 2 * ((FDS_SIDE_BYTES - 58) / 17);
+const MAX_TRACK_BYTES: usize =
+    FDS_SIDE_BYTES + MIN_LEAD_GAP + (MAX_SIDE_BLOCKS - 1) * MIN_BLOCK_GAP + 3 * MAX_SIDE_BLOCKS;
+pub const MAX_DISK_SAVE_BYTES: usize = 255 * MAX_TRACK_BYTES;
 
 fn crc_byte(mut crc: u16, value: u8) -> u16 {
     crc ^= u16::from(value);
@@ -32,6 +39,7 @@ fn append_block(track: &mut Vec<u8>, block: &[u8], gap: usize) {
 }
 
 fn expand_side(track: &mut Vec<u8>, raw: &[u8], side: usize) -> Result<(), MediaError> {
+    let start = track.len();
     let malformed = || MediaError::DiskSide(side);
     if !raw.starts_with(DISK_SIGNATURE) || raw[56] != 2 {
         return Err(malformed());
@@ -57,40 +65,45 @@ fn expand_side(track: &mut Vec<u8>, raw: &[u8], side: usize) -> Result<(), Media
 
     // Each block needs a sync byte and two CRC bytes in addition to its data.
     let block_bytes = raw.len() - rest.len() + 3 * blocks.len();
-    let fits = |lead, between| block_bytes + lead + (blocks.len() - 1) * between <= TRACK_BYTES;
-    // Retain the existing layout for sides that already fit, including saved tracks.
-    let (lead, between) = if fits(LEAD_GAP, BLOCK_GAP) {
+    let default_size = block_bytes + LEAD_GAP + (blocks.len() - 1) * BLOCK_GAP;
+    // Keep both legacy gap choices and the 96 KiB floor so existing snapshots
+    // retain their exact byte layout. Grow denser tracks using minimum gaps.
+    let (lead, between) = if default_size <= BASE_TRACK_BYTES {
         (LEAD_GAP, BLOCK_GAP)
-    } else if fits(MIN_LEAD_GAP, MIN_BLOCK_GAP) {
-        (MIN_LEAD_GAP, MIN_BLOCK_GAP)
     } else {
-        return Err(MediaError::DiskCapacity(side));
+        (MIN_LEAD_GAP, MIN_BLOCK_GAP)
     };
     for (index, block) in blocks.into_iter().enumerate() {
         append_block(track, block, if index == 0 { lead } else { between });
     }
-    track.resize(TRACK_BYTES, 0);
+    track.resize(track.len().max(start + BASE_TRACK_BYTES), 0);
     Ok(())
 }
 
 pub struct Disk {
     tracks: Vec<u8>,
+    offsets: Vec<usize>,
 }
 
 impl Disk {
     pub(crate) fn from_sides(sides: &[u8]) -> Result<Self, MediaError> {
-        let mut tracks = Vec::with_capacity(sides.len() / FDS_SIDE_BYTES * TRACK_BYTES);
-        let mut track = Vec::with_capacity(TRACK_BYTES);
+        let side_count = sides.len() / FDS_SIDE_BYTES;
+        let mut tracks = Vec::with_capacity(side_count * BASE_TRACK_BYTES);
+        let mut offsets = Vec::with_capacity(side_count + 1);
+        offsets.push(0);
         for (index, raw) in sides.as_chunks::<FDS_SIDE_BYTES>().0.iter().enumerate() {
-            track.clear();
-            expand_side(&mut track, raw, index)?;
-            tracks.extend_from_slice(&track);
+            expand_side(&mut tracks, raw, index)?;
+            offsets.push(tracks.len());
         }
-        Ok(Self { tracks })
+        Ok(Self { tracks, offsets })
     }
 
     pub fn side_count(&self) -> usize {
-        self.tracks.len() / TRACK_BYTES
+        self.offsets.len() - 1
+    }
+
+    fn track_range(&self, side: usize) -> Range<usize> {
+        self.offsets[side]..self.offsets[side + 1]
     }
 }
 
@@ -168,7 +181,7 @@ impl Drive {
         }
         self.ready = true;
         self.delay = BYTE_CYCLES;
-        Some(side * TRACK_BYTES + self.head)
+        Some(side)
     }
 
     fn read_cell(&mut self, value: u8) {
@@ -336,7 +349,9 @@ impl Fds {
 
     pub fn tick(&mut self) -> f32 {
         self.timer.tick();
-        if let Some(index) = self.drive.clock() {
+        if let Some(side) = self.drive.clock() {
+            let track = self.disk.track_range(side);
+            let index = track.start + self.drive.head;
             if self.drive.control & 4 != 0 {
                 self.drive.read_cell(self.disk.tracks[index]);
             } else {
@@ -347,7 +362,7 @@ impl Fds {
                 }
             }
             self.drive.head += 1;
-            if self.drive.head == TRACK_BYTES {
+            if index + 1 == track.end {
                 self.drive.control &= !1;
                 self.drive.ready = false;
                 self.drive.irq |= !self.drive.writing_gap() && self.drive.control & 0x80 != 0;
@@ -367,11 +382,15 @@ impl Fds {
             0x4040..=0x4092 if self.io & 2 != 0 => self.audio.read(addr, open),
             0x4030..=0x4033 => match addr {
                 0x4030 => {
+                    let end_of_track = self
+                        .drive
+                        .inserted
+                        .is_some_and(|side| self.drive.head == self.disk.track_range(side).len());
                     let status = (open & 0x24)
                         | u8::from(self.timer.irq)
                         | (self.drive.control & 8)
                         | (u8::from(self.drive.crc_error) << 4)
-                        | (u8::from(self.drive.head == TRACK_BYTES) << 6)
+                        | (u8::from(end_of_track) << 6)
                         | (u8::from(self.drive.transfer) << 7);
                     self.timer.irq = false;
                     status
@@ -523,9 +542,44 @@ mod tests {
 
     #[test]
     fn dense_disk_sides_preserve_every_block_and_crc() {
-        let mut blocks = vec![side()[..56].to_vec(), vec![2, 150]];
-        for file in 0..150u8 {
-            let length = if file == 149 { 461u16 } else { 419 };
+        for (files, payload, last_payload, track_len) in
+            [(150, 419, 461, BASE_TRACK_BYTES), (255, 235, 235, 99_783)]
+        {
+            let blocks = dense_blocks(files, payload, last_payload);
+            let mut raw: Vec<_> = blocks.iter().flatten().copied().collect();
+            raw.resize(FDS_SIDE_BYTES, 0);
+            let mut image = b"FDS\x1a\x01".to_vec();
+            image.resize(16, 0);
+            image.extend_from_slice(&raw);
+            for bytes in [&raw, &image] {
+                let Media::Disk(disk) = Media::parse(bytes).unwrap() else {
+                    panic!("expected FDS");
+                };
+                assert_eq!(disk.side_count(), 1);
+                assert_eq!(disk.tracks.len(), track_len);
+                let mut track = disk.tracks.as_slice();
+                for (index, block) in blocks.iter().enumerate() {
+                    let gap = track.iter().position(|&byte| byte != 0).unwrap();
+                    assert_eq!(gap, if index == 0 { 3269 } else { 60 });
+                    let (cell, rest) = track[gap..].split_at(block.len() + 3);
+                    assert_eq!(cell[0], 0x80);
+                    assert_eq!(&cell[1..1 + block.len()], block);
+                    assert_eq!(cell.iter().copied().fold(0, crc_byte), 0);
+                    track = rest;
+                }
+                assert!(track.iter().all(|&byte| byte == 0));
+            }
+        }
+    }
+
+    fn dense_blocks(files: u8, payload: u16, last_payload: u16) -> Vec<Vec<u8>> {
+        let mut blocks = vec![side()[..56].to_vec(), vec![2, files]];
+        for file in 0..files {
+            let length = if file == files - 1 {
+                last_payload
+            } else {
+                payload
+            };
             let mut header = vec![0; 16];
             header[0] = 3;
             header[1] = file;
@@ -534,28 +588,43 @@ mod tests {
             data[0] = 4;
             blocks.extend([header, data]);
         }
-        let raw: Vec<_> = blocks.iter().flatten().copied().collect();
-        assert_eq!(raw.len(), FDS_SIDE_BYTES);
-        let mut image = b"FDS\x1a\x01".to_vec();
-        image.resize(16, 0);
-        image.extend_from_slice(&raw);
-        for bytes in [&raw, &image] {
-            let Media::Disk(disk) = Media::parse(bytes).unwrap() else {
-                panic!("expected FDS");
-            };
-            assert_eq!(disk.tracks.len(), TRACK_BYTES);
-            let mut track = disk.tracks.as_slice();
-            for (index, block) in blocks.iter().enumerate() {
-                let gap = track.iter().position(|&byte| byte != 0).unwrap();
-                assert!(gap >= if index == 0 { 3269 } else { 60 });
-                let (cell, rest) = track[gap..].split_at(block.len() + 3);
-                assert_eq!(cell[0], 0x80);
-                assert_eq!(&cell[1..1 + block.len()], block);
-                assert_eq!(cell.iter().copied().fold(0, crc_byte), 0);
-                track = rest;
-            }
-            assert!(track.iter().all(|&byte| byte == 0));
-        }
+        blocks
+    }
+
+    #[test]
+    fn mixed_track_lengths_drive_and_restore_at_side_boundaries() {
+        let mut raw: Vec<_> = dense_blocks(255, 235, 235).into_iter().flatten().collect();
+        raw.resize(FDS_SIDE_BYTES, 0);
+        raw.extend(side());
+        let bios = [0; FDS_BIOS_BYTES];
+        let mut fds = Fds::new(Disk::from_sides(&raw).unwrap(), Some(&bios)).unwrap();
+        let boundary = 99_783;
+        assert_eq!(fds.side_count(), 2);
+        assert_eq!(fds.save().len(), boundary + BASE_TRACK_BYTES);
+
+        fds.cpu_write(0x4023, 1);
+        fds.cpu_write(0x4025, 0xe1);
+        fds.cpu_write(0x4024, 0x7b);
+        fds.drive.head = BASE_TRACK_BYTES - 1;
+        clock(&mut fds, SPINUP_CYCLES);
+        assert_eq!(fds.cpu_read(0x4030, 0) & 0x40, 0);
+
+        fds.drive.head = boundary - 1;
+        clock(&mut fds, 2 * BYTE_CYCLES);
+        assert_eq!(fds.cpu_read(0x4030, 0) & 0x40, 0x40);
+        assert_eq!(&fds.save()[boundary - 1..=boundary], &[0x7b, 0]);
+
+        assert!(fds.insert(1));
+        assert_eq!(fds.cpu_read(0x4030, 0) & 0x40, 0);
+        fds.cpu_write(0x4024, 0x3a);
+        fds.cpu_write(0x4025, 0xe1);
+        clock(&mut fds, CHANGE_CYCLES + SPINUP_CYCLES - 1);
+        assert_eq!(fds.inserted(), Some(1));
+        assert_eq!(&fds.save()[boundary - 1..=boundary], &[0x7b, 0x3a]);
+
+        let mut reopened = Fds::new(Disk::from_sides(&raw).unwrap(), Some(&bios)).unwrap();
+        assert!(reopened.restore(fds.save()));
+        assert_eq!(reopened.save(), fds.save());
     }
 
     #[test]
@@ -594,7 +663,7 @@ mod tests {
         assert!(nes.insert_disk(2));
         assert_eq!(nes.disk_side(), None);
         let mut updated = nes.save_bytes().unwrap().to_vec();
-        updated[2 * TRACK_BYTES + 42] = 0x9a;
+        updated[2 * BASE_TRACK_BYTES + 42] = 0x9a;
         assert!(nes.restore_save(&updated));
         assert!(!nes.restore_save(&updated[..200]));
         nes.reset();
@@ -759,7 +828,7 @@ mod tests {
             clock(&mut fds, BYTE_CYCLES);
             fds.cpu_write(0x4025, 0xd1);
             clock(&mut fds, 2 * BYTE_CYCLES);
-            let block = &fds.save()[side * TRACK_BYTES..][..4];
+            let block = &fds.save()[side * BASE_TRACK_BYTES..][..4];
             assert_eq!(block[..2], [0x80, 10 + side as u8]);
             assert_eq!(block.iter().copied().fold(0, crc_byte), 0);
             fds.cpu_write(0x4025, 0);
@@ -768,7 +837,7 @@ mod tests {
         assert_eq!(restored.save()[1], 0);
         assert!(restored.restore(fds.save()));
         assert_eq!(restored.save(), fds.save());
-        assert_eq!(restored.save()[TRACK_BYTES + 1], 0);
+        assert_eq!(restored.save()[BASE_TRACK_BYTES + 1], 0);
     }
 
     #[test]
@@ -792,7 +861,7 @@ mod tests {
         fds.cpu_write(0x4025, 0xa1);
         assert_eq!(fds.cpu_read(0x4030, 0) & 0x80, 0);
         assert!(!fds.irq());
-        fds.drive.head = TRACK_BYTES - 1;
+        fds.drive.head = BASE_TRACK_BYTES - 1;
         clock(&mut fds, BYTE_CYCLES);
         assert_eq!(fds.cpu_read(0x4030, 0) & 0xc0, 0x40);
         assert!(!fds.irq());
