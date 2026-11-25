@@ -37,7 +37,7 @@ Build `web/dist`, install Chromium and run `npm --prefix web test`. Tests use is
 
 The browser lifecycle tests check empty startup, the cartridge popover and local file picker, malformed and unsupported headers, cancellation, switching, pause, restart, keyboard/gamepad/touch input, Help, scaling, Pixel/CRT, fullscreen, mute and volume. They inject gamepad state and a visibility event in Chromium and drive touch via DevTools. The coarse-pointer test starts at 844×390 and verifies that the D-pad sits beside the video in the viewport before fullscreen. It presses and releases a diagonal and checks the resulting emulated pixel in both landscape and 390×844 portrait fullscreen. Cancellation dispatches the browser’s file input event because the native OS dialog is outside Playwright’s scope. The audio checks use real Web Audio, including the post-gain signal and AudioContext state during suspension and resume.
 
-The persistence tests check reload, cartridge-specific saves, reset, row removal, a read failure with an existing save, and recovery from local database and save write failures. The privacy test starts with an empty profile and records requests through several cartridge imports. The expected trace is eight same-origin GETs for HTML, CSS, five JavaScript modules and Wasm, with empty request bodies and zero requests after the app starts.
+The persistence tests check reload, cartridge-specific saves, reset, row removal and recovery from local database and save write failures. A failed save restore during switching keeps the previous cartridge paused. Retrying inserts the candidate with its stored RAM. A two-tab test queues competing writes behind a Web Lock, then verifies that the stale tab reports a conflict and the winning save survives reload. The privacy test starts with an empty profile and records requests through several cartridge imports. The expected trace is eight same-origin GETs for HTML, CSS, five JavaScript modules and Wasm, with empty request bodies and zero requests after the app starts.
 
 ## Artifact checks
 
@@ -45,7 +45,7 @@ The persistence tests check reload, cartridge-specific saves, reset, row removal
 
 ## Reference UI review
 
-The comparison used the published SNES app and a local production NES build served at `/nes-rust-neo/`. The published SNES HTML, CSS and JavaScript matched the files at revision `3e84caa505b09eeb2255e06652a55cfb9d9d4084` byte for byte. Each app started in a fresh Chromium 151.0.7922.34 context at device scale factor 1. Both mobile contexts emulated a coarse pointer. [Pinned SNES frontend](https://github.com/takahirox/snes-rust/tree/3e84caa505b09eeb2255e06652a55cfb9d9d4084/web) · [Published SNES app](https://takahirox.github.io/snes-rust/)
+The comparison used a local copy of the published SNES app and a local production NES build served at `/nes-rust-neo/`. The published SNES HTML, CSS and JavaScript matched the files at revision `3e84caa505b09eeb2255e06652a55cfb9d9d4084` byte for byte. Each app started in a fresh Chromium 151.0.7922.34 context at device scale factor 1. Both mobile contexts emulated a coarse pointer. [Pinned SNES frontend](https://github.com/takahirox/snes-rust/tree/3e84caa505b09eeb2255e06652a55cfb9d9d4084/web) · [Published SNES app](https://takahirox.github.io/snes-rust/)
 
 | Viewport | Paired captures |
 | --- | --- |
@@ -54,6 +54,8 @@ The comparison used the published SNES app and a local production NES build serv
 | Mobile landscape, 844×390 | [Landscape comparison](ui-parity/landscape.png) |
 
 Each image shows the SNES app on the left and the NES app on the right. From top to bottom the rows show empty startup, a local cartridge playing at the defaults, the populated cartridge picker, paused playback at 2× in Pixel with audio muted, the Help disclosure, and fullscreen at the defaults. The SNES screenshots use the original MIT smoke diagnostic generated with `python3 tools/make-fixture.py /tmp/nes-issue3-snes-reference-probe.sfc` from the pinned reference. Its SHA-256 is `6e5518b3959883cc22e914621fc5b5d9f5c0fe4eb96ee61000769afdbb68d6e5`. The NES screenshots use the generated battery diagnostic. [Fixture manifest](../tests/roms/sha256.txt) · [SNES diagnostic generator](https://github.com/takahirox/snes-rust/blob/3e84caa505b09eeb2255e06652a55cfb9d9d4084/tools/make-fixture.py)
+
+In a separate CRT probe, both apps rendered the same flat gray input (RGB 173). At device scale factor 1, the red channel stayed at 174 across 48 consecutive screenshot rows in both mobile orientations. At desktop size it ranged from 165 to 174 on SNES and 166 to 174 on NES. The browser regression checks the mobile fade and desktop scanlines on the NES diagnostic’s actual frame.
 
 | Workflow | Browser result |
 | --- | --- |
@@ -64,7 +66,7 @@ Each image shows the SNES app on the left and the NES app on the right. From top
 | Saves and picker library | Both retained a battery value through Reset, then restored it when reopening the remembered ROM after reload. Both removed the remembered entry. NES tests also cover ROM identity, invalid and cancelled selections, save recovery and switching. |
 | Requests | Neither app made requests between local insertion and the end of the playback and fullscreen comparison. The NES automated test separately verifies the eight startup asset GETs and absence of uploads through cartridge switching. |
 
-The NES player uses its native 256×240 aspect ratio, shows two face buttons, and omits the SNES shoulder buttons and bundled demo entries. The smaller controller leaves more space for video in portrait. The slot reads Change cartridge once a ROM is inserted to make switching discoverable. The existing CSS CRT treatment keeps rendering on the NES canvas without a second graphics pipeline. Fit remains available for existing preferences, and Mute and Exit fullscreen have visible text so their actions are clear. The NES save recovery flow keeps the existing per-ROM battery safeguards and shows recovery messages below the player. Reset preserves the NES player's current play or pause state, and a failed import leaves the current cartridge and its playback state in place.
+The NES player uses its native 256×240 aspect ratio, shows two face buttons, and omits the SNES shoulder buttons and bundled demo entries. The smaller controller leaves more space for video in portrait. The slot reads Change cartridge once a ROM is inserted to make switching discoverable. The CSS CRT overlay uses one scanline per emulated row and fades it across the reference’s range of 1.5 to 2.5 output pixels per row. Fit remains available for existing preferences, and Mute and Exit fullscreen have visible text so their actions are clear. The NES save recovery flow shows recovery messages below the player. Reset and failed imports preserve the current cartridge’s play or pause state.
 
 ## Pre-merge results for Issue #3
 
@@ -78,7 +80,7 @@ The checks below passed from a fresh export of the staged tree on macOS arm64 wi
 | `node tests/roms/check.mjs` | Pinned hashes, both diagnostics and both 18,060-frame gameplay replays passed |
 | `cargo build --locked -p nes-wasm --target wasm32-unknown-unknown --release` | Passed |
 | `npm --prefix web ci` and `npm --prefix web run build` | Passed |
-| `npx --prefix web playwright install chromium` and `npm --prefix web test` | 9 tests passed, including coarse-pointer landscape and fullscreen play, Web Audio, persistence, production-subpath smoke and the request trace |
+| `npx --prefix web playwright install chromium` and `npm --prefix web test` | 11 tests passed, including CRT scanline fade, failed restore during switching, cross-tab save conflicts, fullscreen play, Web Audio and the production-subpath request trace |
 | `node tests/check-static.mjs` | Passed for the tracked tree and eight production assets |
 | `git diff --check` and `git diff --cached --check` | Passed |
 
