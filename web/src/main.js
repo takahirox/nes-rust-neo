@@ -24,6 +24,7 @@ const warnings = new Map();
 const frameMs = 1000 / 60.0988;
 let core;
 let active;
+let pendingCartridge;
 let running = false;
 let busy = false;
 let previous;
@@ -41,7 +42,7 @@ function warn(category, message) {
   const text = parts.join(' ');
   if (get('warnings').textContent !== text) get('warnings').textContent = text;
   get('warnings').hidden = parts.length === 0;
-  get('retry-save').hidden = !saves.hasWarnings;
+  get('retry-save').hidden = !pendingCartridge && !saves.hasWarnings;
 }
 
 function soundError(error) {
@@ -68,15 +69,29 @@ function syncUI() {
   get('reset').disabled = !active || busy;
   cartridgeButton.disabled = !core;
   get('open-file').disabled = !core || busy;
+  get('retry-save').disabled = busy;
   for (const button of library.querySelectorAll('button')) button.disabled = busy;
   pads.setEnabled(enabled());
 }
 
-function flushSave() {
+async function flushSave() {
   saves.capture(active?.save, core);
-  saves.flush(active?.save);
+  await saves.flush(active?.save);
   warn('save', '');
 }
+
+function updateScanlines(height) {
+  const ratio = Math.min(window.devicePixelRatio || 1, 2);
+  const samplesPerRow = Math.round(height * ratio) / canvas.height;
+  const strength = Math.max(0, Math.min(1, samplesPerRow - 1.5));
+  screen.style.setProperty('--scanline-height', `${height / canvas.height}px`);
+  screen.style.setProperty('--scanline-opacity', String(strength * .07));
+}
+
+// Fade the scanlines at small output sizes, as in the SNES reference.
+const picture = canvas.parentElement;
+new ResizeObserver(([entry]) => updateScanlines(entry.contentRect.height)).observe(picture);
+window.addEventListener('resize', () => updateScanlines(picture.getBoundingClientRect().height));
 
 function applyPreferences() {
   screen.dataset.scale = get('scale').value = prefs.scale;
@@ -126,7 +141,7 @@ async function refreshLibrary() {
           const record = await remembered(id);
           if (!record) throw new Error('This ROM is missing from local storage.');
           if (await identify(record.bytes) !== id) throw new Error('The remembered ROM no longer matches its identity.');
-          insert(record);
+          await insert(record);
         });
       };
       const remove = document.createElement('button');
@@ -180,12 +195,22 @@ async function operate(operation) {
   }
 }
 
-function insert({ bytes, id, name }) {
+async function insert(record, rememberImport = false) {
+  const { bytes, id, name } = record;
   const size = core.prepare(new Uint8Array(bytes));
-  flushSave();
-  const save = saves.open(id, name, size, core);
+  await flushSave();
+  let save;
+  try {
+    save = saves.open(id, name, size, core);
+  } catch {
+    pendingCartridge = { record, rememberImport };
+    cartridgePicker.hidePopover();
+    warn('restore', `Could not restore the battery save for ${name}. Existing data is protected.`);
+    return;
+  }
   core.activate();
   if (save) save.revision = core.saveRevision();
+  pendingCartridge = undefined;
   active = { name, save };
   running = true;
   budget = frameMs;
@@ -195,7 +220,15 @@ function insert({ bytes, id, name }) {
   cartridgeButton.textContent = 'Change cartridge';
   cartridgePicker.hidePopover();
   notice('');
-  warn('save', '');
+  warn('restore', '');
+  if (rememberImport) {
+    try {
+      await remember(record);
+      await refreshLibrary();
+    } catch {
+      warn('library', 'This cartridge could not be remembered. It can still be played.');
+    }
+  }
 }
 
 function openPicker() {
@@ -224,14 +257,7 @@ picker.addEventListener('change', () => {
     if (file.size > 8 * 1024 * 1024) throw new Error('ROM file is too large (maximum 8 MiB).');
     const bytes = await file.arrayBuffer();
     const id = await identify(bytes);
-    const record = { id, name: file.name, bytes };
-    insert(record);
-    try {
-      await remember(record);
-      await refreshLibrary();
-    } catch {
-      warn('library', 'This cartridge could not be remembered. It can still be played.');
-    }
+    await insert({ id, name: file.name, bytes }, true);
   });
 });
 
@@ -264,13 +290,20 @@ get('reset').onclick = () => {
   restart();
 };
 get('retry-save').onclick = () => {
-  if (busy) return;
-  flushSave();
-  if (saves.retry(active?.save, core)) {
-    restart();
-    if (running) notice('Battery save restored. Cartridge restarted.');
-  }
-  warn('save', '');
+  if (pendingCartridge) unlockAudio();
+  operate(async () => {
+    if (pendingCartridge) {
+      const { record, rememberImport } = pendingCartridge;
+      await insert(record, rememberImport);
+      return;
+    }
+    await flushSave();
+    if (await saves.retry(active?.save, core)) {
+      restart();
+      if (running) notice('Battery save restored. Cartridge restarted.');
+    }
+    warn('save', '');
+  });
 };
 help.addEventListener('toggle', () => {
   if (help.open) pads.clear();

@@ -95,30 +95,19 @@ export class BatterySaves {
     return Array.from(this.#sessions.values(), session => session.message).filter(Boolean).join(' ');
   }
 
-  #restore(session, core, candidate) {
-    const raw = localStorage.getItem(savePrefix + session.id);
-    const bytes = decode(raw, session.size);
-    if (bytes && !core.restore(bytes, candidate)) throw new Error('Core rejected battery save.');
-    session.base = raw;
-    session.blocked = false;
-    session.message = '';
-  }
-
   open(id, name, size, core) {
     if (!size) return null;
     const cached = this.#sessions.get(id);
     if (cached?.pending) {
+      if (!core.restore(cached.pending, true)) throw new Error('Core rejected battery save.');
       cached.name = name;
-      core.restore(cached.pending, true);
       return cached;
     }
-    const session = { id, name, size, revision: 0, pending: null, base: null, blocked: true, message: '' };
+    const base = localStorage.getItem(savePrefix + id);
+    const bytes = decode(base, size);
+    if (bytes && !core.restore(bytes, true)) throw new Error('Core rejected battery save.');
+    const session = { id, name, size, revision: 0, pending: null, base, blocked: false, writing: null, message: '' };
     this.#sessions.set(id, session);
-    try {
-      this.#restore(session, core, true);
-    } catch {
-      session.message = `Could not restore the battery save for ${name}. Existing data is protected.`;
-    }
     return session;
   }
 
@@ -129,28 +118,42 @@ export class BatterySaves {
   }
 
   flush(session) {
-    if (!session?.pending || session.blocked) return;
+    if (!session) return;
+    if (session.writing) return session.writing;
+    if (!session.pending || session.blocked) return;
+    session.writing = this.#write(session).finally(() => { session.writing = null; });
+    return session.writing;
+  }
+
+  async #write(session) {
     try {
       const key = savePrefix + session.id;
-      const raw = encode(session.pending);
-      const stored = localStorage.getItem(key);
-      if (stored !== session.base && stored !== raw) {
-        session.blocked = true;
-        session.message = `The battery save for ${session.name} changed in another tab. Retry to load the stored version.`;
-        return;
+      // Keep the comparison and write under the same origin-wide lock. Encode
+      // the latest capture after acquiring it in case play continued while waiting.
+      while (session.pending && !session.blocked) {
+        await navigator.locks.request(key, () => {
+          const raw = encode(session.pending);
+          const stored = localStorage.getItem(key);
+          if (stored !== session.base && stored !== raw) {
+            session.blocked = true;
+            session.message = `The battery save for ${session.name} changed in another tab. Retry to load the stored version.`;
+            return;
+          }
+          if (stored !== raw) localStorage.setItem(key, raw);
+          session.base = raw;
+          session.pending = null;
+          session.message = '';
+        });
       }
-      if (stored !== raw) localStorage.setItem(key, raw);
-      session.base = raw;
-      session.pending = null;
-      session.message = '';
     } catch {
       session.message = `Could not write the battery save for ${session.name}. Progress is held in this tab.`;
     }
   }
 
-  retry(active, core) {
+  async retry(active, core) {
     let restored = false;
     for (const session of this.#sessions.values()) {
+      if (session.writing) await session.writing;
       if (session.blocked) {
         try {
           const raw = localStorage.getItem(savePrefix + session.id);
@@ -169,7 +172,7 @@ export class BatterySaves {
           continue;
         }
       }
-      this.flush(session);
+      await this.flush(session);
     }
     return restored;
   }

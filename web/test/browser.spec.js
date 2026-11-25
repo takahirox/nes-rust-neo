@@ -215,6 +215,39 @@ test('playback, controls, display, real audio and hidden-tab suspension', async 
   await expect(page.getByRole('group', { name: 'Controls reference' })).toBeHidden();
 });
 
+test('CRT scanlines fade at mobile size and return at desktop size', async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  await coreReady(page);
+  await choose(page);
+  await seeColor(page, originalColor);
+  await page.getByRole('button', { name: 'Pause', exact: true }).click();
+
+  async function redLevels() {
+    const screenshot = await page.locator('.picture').screenshot();
+    return page.evaluate(async png => {
+      const image = new Image();
+      image.src = `data:image/png;base64,${png}`;
+      await image.decode();
+      const canvas = new OffscreenCanvas(1, 48);
+      const context = canvas.getContext('2d');
+      context.drawImage(image, -Math.floor(image.width / 2), -Math.floor(image.height / 2));
+      const { data } = context.getImageData(0, 0, 1, canvas.height);
+      const reds = data.filter((_, index) => index % 4 === 0);
+      return { darkest: Math.min(...reds), brightest: Math.max(...reds) };
+    }, screenshot.toString('base64'));
+  }
+
+  const mobile = await redLevels();
+  expect(mobile.darkest).toBeGreaterThanOrEqual(172);
+  expect(mobile.brightest).toBeLessThanOrEqual(176);
+  expect(mobile.brightest - mobile.darkest).toBeLessThanOrEqual(1);
+
+  await page.setViewportSize({ width: 1280, height: 900 });
+  const desktop = await redLevels();
+  expect(desktop.brightest - desktop.darkest).toBeGreaterThan(2);
+  expect(desktop.brightest - desktop.darkest).toBeLessThanOrEqual(13);
+});
+
 test.describe('coarse-pointer player', () => {
   test.use({ hasTouch: true, isMobile: true, viewport: { width: 844, height: 390 } });
 
@@ -307,36 +340,96 @@ test('remembered ROMs, saves per identity, reset, removal and preferences', asyn
   await seeColor(page, pressColor);
 });
 
-test('failed restore protects an existing save and retry recovers it', async ({ page }) => {
+test('failed save restore preserves the paused cartridge and retry inserts the candidate', async ({ page }) => {
   await page.addInitScript(() => {
     const getItem = Storage.prototype.getItem;
     Storage.prototype.getItem = function (name) {
-      if (window.failRestore && name.includes('/battery-v1/')) throw new DOMException('Test read failure', 'SecurityError');
+      if (name === window.failRestoreKey) throw new DOMException('Test read failure', 'SecurityError');
       return getItem.call(this, name);
     };
   });
   await coreReady(page);
-  const hash = createHash('sha256').update(await readFile(fixture())).digest('hex');
+  await choose(page);
+  await seeColor(page, originalColor);
+  await key(page, 'x', pressColor);
+  await page.getByRole('button', { name: 'Pause', exact: true }).click();
+
+  const hash = createHash('sha256').update(await readFile(fixture('diagnostic-alternate'))).digest('hex');
   const storageKey = 'nes-rust-neo/battery-v1/' + hash;
   const bytes = Buffer.alloc(8192);
   bytes[0] = 2;
   const encoded = bytes.toString('base64');
   await page.evaluate(({ storageKey, encoded }) => {
     localStorage.setItem(storageKey, encoded);
-    window.failRestore = true;
+    window.failRestoreKey = storageKey;
   }, { storageKey, encoded });
-  await choose(page);
+  await page.locator('#rom').setInputFiles(fixture('diagnostic-alternate'));
   await expect(page.locator('#warnings')).toHaveText(/Existing data is protected/);
-  await seeColor(page, originalColor);
-  await key(page, 'x', pressColor);
-  await page.getByRole('button', { name: 'Reset', exact: true }).click();
+  await expect(page.locator('#inserted')).toHaveText('diagnostic.nes');
+  await expect(page.getByRole('button', { name: 'Play', exact: true })).toBeEnabled();
+  await expect(page.locator('#library li')).toHaveCount(1);
   await seeColor(page, pressColor);
-  await page.evaluate(() => { window.failRestore = false; });
+  await page.evaluate(() => { delete window.failRestoreKey; });
   expect(await page.evaluate(key => localStorage.getItem(key), storageKey)).toBe(encoded);
   await page.getByRole('button', { name: 'Retry save storage' }).click();
+  await expect(page.locator('#inserted')).toHaveText('diagnostic-alternate.nes');
+  await expect(page.getByRole('button', { name: 'Pause', exact: true })).toBeEnabled();
   await seeColor(page, secondPressColor);
-  await expect(page.locator('#status')).toHaveText('Battery save restored. Cartridge restarted.');
   await expect(page.locator('#warnings')).toBeHidden();
+  await expect(page.locator('#library li')).toHaveCount(2);
+});
+
+test('two tabs serialize save writes and a stale tab preserves the winning save', async ({ page: winner, context }) => {
+  const stale = await context.newPage();
+  for (const page of [winner, stale]) {
+    await coreReady(page);
+    await choose(page);
+    await seeColor(page, originalColor);
+  }
+
+  const hash = createHash('sha256').update(await readFile(fixture())).digest('hex');
+  const storageKey = 'nes-rust-neo/battery-v1/' + hash;
+  // Hold the real origin-wide lock until both application writes are waiting.
+  await winner.evaluate(key => new Promise(resolve => {
+    void navigator.locks.request(key, () => new Promise(release => {
+      window.releaseSaveLock = release;
+      resolve();
+    }));
+  }), storageKey);
+  const queued = () => winner.evaluate(async key => {
+    const { pending } = await navigator.locks.query();
+    return pending.filter(lock => lock.name === key).length;
+  }, storageKey);
+  try {
+    await winner.bringToFront();
+    await winner.locator('canvas').focus();
+    await key(winner, 'x', pressColor);
+    await winner.getByRole('button', { name: 'Pause', exact: true }).click();
+    await expect.poll(queued).toBe(1);
+
+    await stale.bringToFront();
+    await stale.locator('canvas').focus();
+    await key(stale, 'x', pressColor);
+    await key(stale, 'ArrowRight', [100, 176, 255]);
+    await key(stale, 'x', secondPressColor);
+    await stale.getByRole('button', { name: 'Pause', exact: true }).click();
+    await expect.poll(queued).toBe(2);
+    expect(await winner.evaluate(key => localStorage.getItem(key), storageKey)).toBeNull();
+  } finally {
+    await winner.evaluate(() => window.releaseSaveLock());
+  }
+
+  await expect(stale.locator('#warnings')).toHaveText(/changed in another tab/);
+  expect(await winner.evaluate(key => atob(localStorage.getItem(key)).charCodeAt(0), storageKey)).toBe(1);
+  await stale.getByRole('button', { name: 'Retry save storage' }).click();
+  await expect(stale.locator('#warnings')).toBeHidden();
+  await stale.getByRole('button', { name: 'Play', exact: true }).click();
+  await seeColor(stale, pressColor);
+  await stale.reload();
+  await openCartridges(stale);
+  await stale.getByRole('button', { name: 'diagnostic.nes', exact: true }).click();
+  await seeColor(stale, pressColor);
+  await expect(stale.locator('#warnings')).toBeHidden();
 });
 
 test('unavailable cartridge storage and failed writes can recover after switching', async ({ page }) => {
