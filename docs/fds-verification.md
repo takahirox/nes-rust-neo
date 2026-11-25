@@ -19,6 +19,8 @@ Run `node tests/fds/build.mjs` to generate binaries and replay files under ignor
 
 `cargo test --workspace --locked` checks one-, two- and three-side parsing, header count and padding, bad signatures/blocks and truncation, BIOS size and reset-vector mapping, CPU program RAM, CHR RAM, PPU mirroring, timer repeat/one-shot and acknowledgment, byte-cell timing, drive reset/settling/empty status, CRC acceptance and rejection, disk writes across sides, snapshots, waveform RAM, envelope rate, modulation wrap and the combined analog-level approximation at the shared APU sample rate.
 
+The register tests and diagnostic BIOS verify that `$4030` bit 7 stays set across repeated status reads. Servicing `$4031` or `$4024` clears the flag and its disk IRQ. The audio regression checks that an odd-step `$4088` write updates both steps of the same entry and that playback uses the revised modulation. [FDS register hardware tests](https://www.nesdev.org/wiki/User:TakuikaNinja/FDS_Registers) · [Modulation table write behavior](https://www.nesdev.org/wiki/FDS_audio#Mod_table_write_($4088))
+
 `node tests/fds/check.mjs` runs the native gate below with pinned fixtures, 30-second per-run limits and an ignored scratch directory. It checks the full before/after track difference. Only the progress byte and that block’s two CRC bytes may differ on each side. The original disk file remains byte-identical. It then opens the headerless equivalent with the saved tracks, boots the independent single side, and verifies that saves for the wrong original image and attempts to overwrite an existing snapshot are rejected.
 
 To reproduce the three-side replay directly from the root, use a new output filename.
@@ -28,16 +30,16 @@ node tests/fds/build.mjs
 cargo run --locked --release -p nes-runner -- tests/generated/fds-relay.fds \
   --bios tests/generated/fds-bios.rom --frames 285 \
   --replay tests/generated/fds-relay.replay --disk 105:eject --disk 106:2 --disk 193:3 \
-  --expect 27:08:03 --expect 54:11:46 --expect 100:12:12 --expect 191:12:23 \
+  --expect 27:08:81 --expect 54:11:46 --expect 100:12:12 --expect 191:12:23 \
   --expect 280:12:34 --expect 280:13:03 --expect 280:19:02 \
   --disk-save-out tests/generated/relay-example.fds-save
 ```
 
 | Run | Expected and observed checkpoints | Final video FNV-1a | Audio samples, peak and FNV-1a |
 | --- | --- | --- | --- |
-| Three-side replay, 285 frames | Both IRQs by frame 27. Controller moved the courier to x=70 by frame 54. Wrote and reread `12`, `23`, `34` by frames 100, 191 and 280, with three deliveries and two side handoffs on the same running guest. | `b26e461551898ea9` | 227,564 · 0.05424 · `356390cd50bf5226` |
-| Headerless reopen, 100 frames | Restored `12`, `23`, `34` by frames 30, 64 and 96. | `034782452e64f015` | 79,807 · 0.05424 · `8616813c05513881` |
-| Single side, 130 frames | Side marker 4 by frame 29. Delivered and reread `45` by frame 129. | `ccd9a3d977d9b9a5` | 103,768 · 0.05424 · `9140e06632ef46e6` |
+| Three-side replay, 285 frames | Both IRQs by frame 27. Controller moved the courier to x=70 by frame 54. Wrote and reread `12`, `23`, `34` by frames 100, 191 and 280, with three deliveries and two side handoffs on the same running guest. | `b26e461551898ea9` | 227,564 · 0.05423 · `9beb18f001229527` |
+| Headerless reopen, 100 frames | Restored `12`, `23`, `34` by frames 30, 64 and 96. | `034782452e64f015` | 79,807 · 0.05423 · `bf55a37723f9d6b4` |
+| Single side, 130 frames | Side marker 4 by frame 29. Delivered and reread `45` by frame 129. | `ccd9a3d977d9b9a5` | 103,768 · 0.05423 · `24fad98d3e98a6d3` |
 
 The runner snapshot begins with `FDS-SAV1` and an eight-byte little-endian FNV-1a fingerprint of the original headerless payload, followed by the mutable tracks in side order. Browser storage uses SHA-256 keys and a separate versioned IndexedDB record. The snapshots preserve all emulated disk writes, including gap and CRC bytes.
 
@@ -48,6 +50,7 @@ The runner snapshot begins with `FDS-SAV1` and an eight-byte little-endian FNV-1
 - The single picker loads local NES and FDS media and reopens both from **My games**. Tests cover NES → FDS → NES → FDS, content-based validation, preserved paused/running state, missing/invalid/cancelled BIOS input, BIOS reuse/replacement/forgetting, all three sides, and a one-side image.
 - The real Wasm guest produces changing canvas frames from controller input, and the app passes a signal with an absolute peak above 0.04 to Web Audio. The guest observes ejection/reinsertion and keeps RAM across side changes.
 - Tests write and read back `12`, `23`, `34` through guest disk registers, assert the exact persisted bytes, reset on side three, switch to NES, remove the library entry, reload, and reimport the headerless form. The single-side game starts at `44` and independently saves `45`. The original local file remains byte-identical.
+- With an earlier save completion callback held, reloading after a write on side B restores the exact bytes `12` and `23` on sides A and B. The save handler explicitly starts the IndexedDB commit during navigation, when the browser can suspend request callbacks. [Chrome page lifecycle guidance](https://developer.chrome.com/docs/web-platform/page-lifecycle-api)
 - Injected disk storage read errors, malformed saves, and write failures preserve the current machine. A failed write prevents switching until it succeeds. Two tabs cannot write the same image concurrently. After the owner commits and switches, the second tab retries and reads the committed value. A seeded version-1 cartridge record and battery save reopen without reimport. The cartridge recovery checks still use the legacy database and key prefixes.
 - Network tracing covers local file loading, BIOS registration, replacement and forgetting, disk use and remembered-game switches. Requests are same-origin static GETs with empty bodies. The asset audit verifies the allowlist, Wasm format, production source network calls, and tracked binary exclusions.
 
@@ -73,10 +76,10 @@ Run the documented [README test commands](../README.md#test) with Chromium insta
 
 | Commands | Result |
 | --- | --- |
-| `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets --locked -- -D warnings`, `cargo test --workspace --locked` | Passed. 20 Rust tests. |
+| `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets --locked -- -D warnings`, `cargo test --workspace --locked` | Passed. 21 Rust tests. |
 | `node tests/roms/check.mjs`, `node tests/fds/check.mjs` | Passed. Pinned fixture hashes, cartridge diagnostics, both 18,060-frame cartridge replays and all disk replays. |
 | `cargo build --locked -p nes-wasm --target wasm32-unknown-unknown --release`, `npm --prefix web ci`, `npm --prefix web run build` | Passed. Release Wasm and static app built. |
-| `npx --prefix web playwright install chromium`, `npm --prefix web test` | Passed. 27 browser tests, including the FDS flows and the existing device, audio, library and save checks. |
+| `npx --prefix web playwright install chromium`, `npm --prefix web test` | Passed. 29 browser tests, including the FDS flows and the existing device, audio, library and save checks. |
 | `node tests/check-static.mjs`, `git diff --check`, `git diff --cached --check` | Passed. Nine production assets and tracked-media exclusions. |
 
 ## Publication

@@ -15,6 +15,8 @@ function access(database, mode, operation) {
     const request = operation(transaction.objectStore('data'));
     transaction.oncomplete = () => resolve(request.result);
     transaction.onabort = () => reject(transaction.error ?? new Error('Disk storage transaction aborted.'));
+    // A navigation can suspend request callbacks before IndexedDB auto-commits.
+    if (mode === 'readwrite') transaction.commit?.();
   });
 }
 
@@ -66,24 +68,25 @@ export class DiskSave {
     return this.revision !== core.saveRevision();
   }
 
-  // Create the transaction in the same turn as the snapshot so it can finish
-  // even if the document begins navigating while IndexedDB commits it.
+  // Queue each newer snapshot immediately so IndexedDB can commit it in order
+  // even if the document navigates before the previous completion callback.
   flush(core) {
-    if (this.writing) return this.writing;
-    if (!this.dirty(core)) return Promise.resolve(true);
     const revision = core.saveRevision();
+    if (this.writing?.revision === revision) return this.writing.promise;
+    if (this.revision === revision) return Promise.resolve(true);
     const bytes = core.saveBytes();
-    this.writing = access(this.db, 'readwrite', store => store.put({ version: 1, bytes }, this.id))
-      .then(() => {
-        this.revision = revision;
-        this.failed = false;
-        return true;
-      }, () => {
-        this.failed = true;
-        return false;
-      })
-      .finally(() => { this.writing = undefined; });
-    return this.writing;
+    const promise = access(this.db, 'readwrite', store => store.put({ version: 1, bytes }, this.id))
+      .then(() => true, () => false)
+      .then(saved => {
+        if (this.writing?.promise === promise) {
+          if (saved) this.revision = revision;
+          this.failed = !saved;
+          this.writing = undefined;
+        }
+        return saved;
+      });
+    this.writing = { revision, promise };
+    return promise;
   }
 
   // The caller suspends emulation until all prior changes are safely stored.

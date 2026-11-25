@@ -43,8 +43,7 @@ boot:
     sta $4025
 @interrupt:
     lda flags
-    and #2
-    beq @interrupt
+    bpl @interrupt
     sei
     lda #$45
     sta $4025
@@ -137,8 +136,7 @@ finish_block:
 
 read_byte:
     lda $4030
-    and #2
-    beq read_byte
+    bpl read_byte
     lda $4031
     rts
 
@@ -166,6 +164,8 @@ write_header:
     ldy #>3537
 @gap:
     jsr wait_write
+    lda #0
+    sta $4024
     dex
     bne @gap
     cpy #0
@@ -197,8 +197,7 @@ write_header:
     rts
 wait_write:
     lda $4030
-    and #2
-    beq wait_write
+    bpl wait_write
     rts
 
 nmi:
@@ -207,15 +206,25 @@ nmi:
 irq:
     pha
     lda $4030
+    and #$81
     ora flags
     sta flags
-    and #2
-    beq :+
+    bpl :+
+    ; Status reads leave the byte pending until the data register is serviced.
+    lda $4030
+    and #$82
+    cmp #$80
+    bne @fault
     lda $4031
     sta irq_byte
+    lda $4030
+    and #$82
+    bne @fault
 :
     pla
     rti
+@fault:
+    jmp fault
 
 .segment "VECTORS"
 .word nmi, boot, irq

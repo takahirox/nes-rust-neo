@@ -623,7 +623,7 @@ function animate(now) {
     if (drew) core.draw(context, image);
     showDiskState();
     flushDisk();
-    if (now - lastSave >= 500) {
+    if (now - lastSave >= 500 && !active.diskSave?.writing) {
       flushSave();
       lastSave = now;
     }

@@ -75,7 +75,7 @@ function waitRam(page, address, value) {
 
 async function booted(page, side = 1) {
   await waitRam(page, 0x10, side);
-  expect(await peek(page, 8)).toBe(3);
+  expect(await peek(page, 8)).toBe(0x81);
   expect(await peek(page, 0x1f)).toBe(0);
 }
 
@@ -308,6 +308,46 @@ test('guest video, side progression and exact disk writes survive reset, removal
   await expect.poll(async () => diskStorage(page, await saveKey(single))).toEqual([0x45]);
   expect(await diskStorage(page, id)).toEqual([0x12, 0x23, 0x34]);
   expect(await readFile(fixture(multi))).toEqual(original);
+});
+
+test('reload preserves the newest writes on both sides while an earlier save is pending', async ({ page }) => {
+  const id = await saveKey(multi);
+  await page.addInitScript(id => {
+    const put = IDBObjectStore.prototype.put;
+    IDBObjectStore.prototype.put = function (value, key) {
+      const request = put.call(this, value, key);
+      if (key === id) {
+        this.transaction.addEventListener('complete', event => {
+          // Writes commit, but their callbacks stay pending in the old document.
+          event.stopImmediatePropagation();
+        }, { once: true });
+      }
+      return request;
+    };
+  }, id);
+  await ready(page);
+  await loadFile(page, multi);
+  await localBios(page);
+  await loaded(page, multi);
+  await booted(page);
+
+  await deliver(page);
+  expect(await peek(page, 0x12)).toBe(0x12);
+  expect(await diskStorage(page, id)).toEqual([0x12, 0x22, 0x33]);
+  await changeSide(page, 2);
+  await deliver(page);
+  expect(await peek(page, 0x12)).toBe(0x23);
+  expect(await diskStorage(page, id)).toEqual([0x12, 0x22, 0x33]);
+
+  page.once('dialog', dialog => dialog.accept());
+  await page.reload();
+  await remembered(page, multi);
+  await loaded(page, multi);
+  await booted(page);
+  expect(await peek(page, 0x12)).toBe(0x12);
+  await changeSide(page, 2);
+  expect(await peek(page, 0x12)).toBe(0x23);
+  expect(await diskStorage(page, id)).toEqual([0x12, 0x23, 0x33]);
 });
 
 test('disk storage failures and concurrent tabs preserve the active game and allow retry', async ({ page, context }) => {
