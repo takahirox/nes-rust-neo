@@ -8,6 +8,7 @@ const fixture = (name = 'diagnostic') => fileURLToPath(new URL(name + '.nes', fi
 const originalColor = [173, 173, 173];
 const pressColor = [21, 95, 217];
 const secondPressColor = [66, 64, 255];
+const thirdPressColor = [117, 39, 254];
 
 async function coreReady(page) {
   await page.goto('./');
@@ -493,6 +494,87 @@ for (const [departure, competingSave] of [
       await expect.poll(() => savedValue(other, storageKey)).toBe(2);
     }
     await expect(reopened.locator('#warnings')).toBeHidden();
+  });
+}
+
+for (const competingSave of [false, true]) {
+  const outcome = competingSave ? 'protects the shared save' : 'commits the newest draft';
+  test(`reload with an older session backup ${outcome}`, async ({ page, context }) => {
+    await page.addInitScript(() => {
+      const { setItem, removeItem } = Storage.prototype;
+      Storage.prototype.setItem = function (name, value) {
+        if (window.failDraftWrite && this === localStorage && name.includes('/battery-draft-v1/')) {
+          throw new DOMException('Test quota failure', 'QuotaExceededError');
+        }
+        return setItem.call(this, name, value);
+      };
+      Storage.prototype.removeItem = function (name) {
+        if (window.failBackupCleanup && this === sessionStorage && name.includes('/battery-draft-v1/')) {
+          throw new DOMException('Test cleanup failure', 'SecurityError');
+        }
+        return removeItem.call(this, name);
+      };
+    });
+
+    await coreReady(page);
+    await choose(page);
+    await seeColor(page, originalColor);
+    const storageKey = await batteryKey();
+    const backupKey = storageKey.replace('/battery-v1/', '/battery-draft-v1/');
+    const drafts = () => page.evaluate(key => {
+      const backup = JSON.parse(sessionStorage.getItem(key));
+      const draftKey = Object.keys(localStorage).find(name => name.startsWith(key + '/'));
+      const draft = draftKey ? JSON.parse(localStorage.getItem(draftKey)) : null;
+      return [backup, draft].map(copy => copy ? atob(copy.raw).charCodeAt(0) : null);
+    }, backupKey);
+    await key(page, 'x', pressColor);
+    await expect.poll(() => savedValue(page, storageKey)).toBe(1);
+
+    const other = await context.newPage();
+    await coreReady(other);
+    await holdSaveLock(other, storageKey);
+    try {
+      await page.bringToFront();
+      await page.locator('canvas').focus();
+      await page.evaluate(() => { window.failDraftWrite = true; });
+      await key(page, 'ArrowRight', [100, 176, 255]);
+      await key(page, 'x', secondPressColor);
+      await expect.poll(drafts).toEqual([2, null]);
+      await expect.poll(() => queuedSaveWrites(other, storageKey)).toBe(1);
+
+      await page.evaluate(() => {
+        window.failDraftWrite = false;
+        window.failBackupCleanup = true;
+      });
+      await key(page, 'ArrowRight', [100, 176, 255]);
+      await key(page, 'x', thirdPressColor);
+      await page.getByRole('button', { name: 'Pause', exact: true }).click();
+      await expect.poll(drafts).toEqual([2, 3]);
+      expect(await savedValue(other, storageKey)).toBe(1);
+
+      await page.reload();
+      await expect.poll(() => queuedSaveWrites(other, storageKey)).toBe(0);
+      if (competingSave) {
+        await other.evaluate(key => localStorage.setItem(key, btoa('\0'.repeat(8192))), storageKey);
+      }
+    } finally {
+      await other.evaluate(() => window.releaseSaveLock());
+    }
+
+    await openCartridges(page);
+    await page.getByRole('button', { name: 'diagnostic.nes', exact: true }).click();
+    await seeColor(page, thirdPressColor);
+    if (competingSave) {
+      await expect(page.locator('#warnings')).toHaveText(/changed in another tab/);
+      expect(await savedValue(other, storageKey)).toBe(0);
+      expect(await drafts()).toEqual([2, 3]);
+      await page.getByRole('button', { name: 'Retry save storage' }).click();
+      await seeColor(page, originalColor);
+    } else {
+      await expect.poll(() => savedValue(other, storageKey)).toBe(3);
+    }
+    await expect.poll(drafts).toEqual([null, null]);
+    await expect(page.locator('#warnings')).toBeHidden();
   });
 }
 

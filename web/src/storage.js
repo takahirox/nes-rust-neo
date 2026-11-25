@@ -122,7 +122,8 @@ function readDraft(raw) {
   const draft = JSON.parse(raw);
   if (draft !== null && (typeof draft.raw !== 'string' ||
       (draft.base !== null && typeof draft.base !== 'string') ||
-      (draft.key !== undefined && typeof draft.key !== 'string'))) {
+      (draft.key !== undefined && typeof draft.key !== 'string') ||
+      (draft.sequence !== undefined && (!Number.isSafeInteger(draft.sequence) || draft.sequence < 1)))) {
     throw new Error('Battery save recovery data is invalid.');
   }
   return draft;
@@ -163,12 +164,15 @@ export class BatterySaves {
     try {
       const base = localStorage.getItem(savePrefix + id);
       const storedBytes = decode(base, size);
-      const draft = backup ?? readDraft(raw ?? null);
+      const staged = readDraft(raw ?? null);
+      // Either copy can outlive a failed write or cleanup. Keep the previous
+      // backup preference when older records have no sequence to compare.
+      const draft = !backup || (staged?.sequence ?? 0) > (backup.sequence ?? 0) ? staged : backup;
       const bytes = draft ? decode(draft.raw, size) : storedBytes;
       if (bytes && !core.restore(bytes, true)) throw new Error('Core rejected battery save.');
       const blocked = Boolean(draft && base !== draft.base && base !== draft.raw);
       const session = {
-        id, name, size, revision: 0, pending: draft, staged: backup ? null : draft,
+        id, name, size, revision: 0, pending: draft, staged,
         draftKey, releaseDraft, backup, base: blocked ? draft.base : base,
         blocked, writing: null, writeFailed: false,
       };
@@ -186,7 +190,11 @@ export class BatterySaves {
     const revision = core.saveRevision();
     if (session.revision === revision) return;
     session.revision = revision;
-    session.pending = { base: session.base, raw: encode(core.saveBytes()) };
+    session.pending = {
+      base: session.base,
+      raw: encode(core.saveBytes()),
+      sequence: (session.pending?.sequence ?? 0) + 1,
+    };
   }
 
   flush(session) {
@@ -262,7 +270,8 @@ export class BatterySaves {
             this.#clearDraft(session);
             if (session === active) restored = true;
           } else {
-            session.pending = { base: raw, raw: session.pending.raw };
+            const { raw: pendingRaw, sequence = 0 } = session.pending;
+            session.pending = { base: raw, raw: pendingRaw, sequence: sequence + 1 };
           }
           session.base = raw;
           session.blocked = false;
