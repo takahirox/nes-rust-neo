@@ -1,0 +1,8 @@
+[package]
+name = "nes-runner"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+nes-core = { path = "../nes-core" }

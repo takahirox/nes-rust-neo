@@ -1,0 +1,67 @@
+name: Validate and deploy Pages
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v6
+      - name: Set up Rust
+        run: |
+          rustup toolchain install stable --profile minimal --component rustfmt --component clippy --target wasm32-unknown-unknown
+          rustup default stable
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - name: Install fixture assembler
+        run: sudo apt-get update && sudo apt-get install -y cc65
+      - name: Check native Rust
+        run: |
+          cargo fmt --all -- --check
+          cargo clippy --workspace --all-targets --locked -- -D warnings
+          cargo test --workspace --locked
+          node tests/roms/check.mjs
+      - name: Build browser app
+        run: |
+          cargo build --locked -p nes-wasm --target wasm32-unknown-unknown --release
+          npm --prefix web ci
+          npm --prefix web run build
+          node tests/check-static.mjs
+      - name: Check production app in Chromium
+        run: |
+          npx --prefix web playwright install --with-deps chromium
+          npm --prefix web test
+      - name: Upload validated Pages artifact
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        uses: actions/upload-pages-artifact@v4
+        with:
+          path: web/dist
+
+  deploy:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: validate
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    concurrency:
+      group: github-pages
+      cancel-in-progress: false
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.pages.outputs.page_url }}
+    steps:
+      - name: Deploy GitHub Pages
+        id: pages
+        uses: actions/deploy-pages@v4
