@@ -6,15 +6,18 @@ import {
 } from './storage.js';
 
 const get = id => document.getElementById(id);
+const presentation = get('game-presentation');
 const screen = get('screen');
 const canvas = screen.querySelector('canvas');
 const context = canvas.getContext('2d', { alpha: false });
 const image = context.createImageData(256, 240);
 const picker = get('rom');
+const cartridgePicker = get('cartridge-picker');
+const cartridgeButton = get('change-cartridge');
 const library = get('library');
 const play = get('play');
-const help = get('help-dialog');
-const prefs = { scale: 'fit', display: 'pixel', volume: 65, muted: false };
+const help = get('help');
+const prefs = { scale: '3', display: 'crt', volume: 100, muted: false };
 const sound = new Sound();
 const saves = new BatterySaves();
 const warnings = new Map();
@@ -46,7 +49,7 @@ function soundError(error) {
 }
 
 function unlockAudio() {
-  if (!document.hidden && !sound.active) {
+  if (!document.hidden && !prefs.muted && !sound.active) {
     sound.unlock().then(() => {
       warn('audio', '');
       if (document.hidden) return sound.suspend();
@@ -55,7 +58,7 @@ function unlockAudio() {
 }
 
 function enabled() {
-  return Boolean(active && running && !busy && !document.hidden && !help.open);
+  return Boolean(active && running && !busy && !document.hidden);
 }
 const pads = controls(document.querySelector('.touch'), enabled, unlockAudio);
 
@@ -63,8 +66,8 @@ function syncUI() {
   play.textContent = running ? 'Pause' : 'Play';
   play.disabled = !active || busy;
   get('reset').disabled = !active || busy;
+  cartridgeButton.disabled = !core;
   get('open-file').disabled = !core || busy;
-  get('open-screen').disabled = !core || busy;
   for (const button of library.querySelectorAll('button')) button.disabled = busy;
   pads.setEnabled(enabled());
 }
@@ -78,7 +81,9 @@ function flushSave() {
 function applyPreferences() {
   screen.dataset.scale = get('scale').value = prefs.scale;
   screen.dataset.display = get('display').value = prefs.display;
-  get('volume').value = prefs.volume;
+  const volume = prefs.muted ? 0 : prefs.volume;
+  get('volume').value = volume;
+  get('volume').setAttribute('aria-valuetext', volume ? `${volume}%` : '0% (muted)');
   get('mute').setAttribute('aria-pressed', String(prefs.muted));
   get('mute').textContent = prefs.muted ? 'Unmute' : 'Mute';
   sound.settings(prefs.volume / 100, prefs.muted);
@@ -89,8 +94,8 @@ try {
   if (stored) {
     if (['fit', '1', '2', '3'].includes(stored.scale)) prefs.scale = stored.scale;
     if (['pixel', 'crt'].includes(stored.display)) prefs.display = stored.display;
-    if (Number.isFinite(stored.volume)) prefs.volume = Math.max(0, Math.min(100, stored.volume));
-    prefs.muted = stored.muted === true;
+    if (Number.isFinite(stored.volume) && stored.volume > 0) prefs.volume = Math.min(100, stored.volume);
+    prefs.muted = stored.muted === true || stored.volume === 0;
   }
 } catch {
   warn('preferences', 'Could not read preferences from browser storage.');
@@ -127,17 +132,18 @@ async function refreshLibrary() {
       const remove = document.createElement('button');
       remove.textContent = 'Remove';
       remove.type = 'button';
+      remove.className = 'remove-cartridge';
       remove.setAttribute('aria-label', `Remove ${name}`);
       remove.onclick = () => operate(async () => {
         await removeCartridge(id);
         await refreshLibrary();
-        notice(`Removed ${name} from this browser’s list.`);
+        get('library-status').textContent = `Removed ${name} from this browser’s list.`;
       });
       row.append(open, remove);
       return row;
     });
     library.replaceChildren(...rows);
-    library.hidden = rows.length === 0;
+    get('my-cartridges').hidden = rows.length === 0;
     warn('library', '');
     syncUI();
   } catch {
@@ -155,16 +161,22 @@ function clearTransient() {
 async function operate(operation) {
   if (busy || !core) return;
   busy = true;
+  get('library-status').textContent = '';
   clearTransient();
   syncUI();
   try {
     await operation();
   } catch (error) {
-    notice(error.message);
+    if (cartridgePicker.matches(':popover-open')) get('library-status').textContent = error.message;
+    else notice(error.message);
   } finally {
     busy = false;
     syncUI();
-    if (active && running && !document.hidden && !help.open) canvas.focus({ preventScroll: true });
+    if (cartridgePicker.matches(':popover-open')) {
+      if (!cartridgePicker.contains(document.activeElement)) get('open-file').focus({ preventScroll: true });
+    } else if (active && running && !document.hidden && !help.open) {
+      canvas.focus({ preventScroll: true });
+    }
   }
 }
 
@@ -179,18 +191,27 @@ function insert({ bytes, id, name }) {
   budget = frameMs;
   get('empty').hidden = true;
   get('inserted').textContent = name;
+  get('inserted').title = name;
+  cartridgeButton.textContent = 'Change cartridge';
+  cartridgePicker.hidePopover();
   notice('');
   warn('save', '');
 }
 
 function openPicker() {
   unlockAudio();
+  cartridgePicker.hidePopover();
   picker.value = '';
   picker.click();
 }
 
 get('open-file').onclick = openPicker;
-get('open-screen').onclick = openPicker;
+cartridgePicker.addEventListener('beforetoggle', event => {
+  if (event.newState === 'open') {
+    pads.clear();
+    get('library-status').textContent = warnings.get('library') || '';
+  }
+});
 picker.addEventListener('cancel', () => {
   notice('File selection cancelled.');
   if (active) canvas.focus({ preventScroll: true });
@@ -251,30 +272,62 @@ get('retry-save').onclick = () => {
   }
   warn('save', '');
 };
-get('help').onclick = () => {
-  if (!help.open) help.showModal();
-  clearTransient();
-  syncUI();
-};
-help.addEventListener('close', () => syncUI());
+help.addEventListener('toggle', () => {
+  if (help.open) pads.clear();
+});
+help.addEventListener('keydown', event => {
+  if (event.key === 'Escape' && help.open) {
+    event.preventDefault();
+    help.open = false;
+    help.querySelector('summary').focus();
+  }
+});
+help.addEventListener('focusout', event => {
+  if (!help.contains(event.relatedTarget)) help.open = false;
+});
+document.addEventListener('pointerdown', event => {
+  if (help.open && !help.contains(event.target)) help.open = false;
+});
 get('mute').onclick = () => {
   prefs.muted = !prefs.muted;
   storePreferences();
   if (!prefs.muted) unlockAudio();
 };
-get('volume').oninput = event => { prefs.volume = Number(event.target.value); storePreferences(); };
+get('volume').oninput = event => {
+  const volume = Number(event.target.value);
+  prefs.muted = volume === 0;
+  if (volume) prefs.volume = volume;
+  storePreferences();
+  if (volume) unlockAudio();
+};
 get('scale').onchange = event => { prefs.scale = event.target.value; storePreferences(); };
 get('display').onchange = event => { prefs.display = event.target.value; storePreferences(); };
 
-get('fullscreen').onclick = async () => {
+const fullscreen = get('fullscreen');
+const playerChrome = document.querySelectorAll('header, .toolbar, .game-entry, .notices');
+let fullscreenFromKeyboard = false;
+fullscreen.onclick = async event => {
+  fullscreenFromKeyboard = event.detail === 0;
   try {
-    await screen.requestFullscreen();
-    if (active) canvas.focus({ preventScroll: true });
+    await presentation.requestFullscreen();
   } catch {
     notice('Fullscreen is unavailable in this browser.');
   }
 };
 get('exit-fullscreen').onclick = () => document.exitFullscreen().catch(() => notice('Could not leave fullscreen.'));
+document.addEventListener('fullscreenchange', () => {
+  const expanded = document.fullscreenElement === presentation;
+  for (const element of playerChrome) element.inert = expanded;
+  pads.clear();
+  if (expanded) {
+    const target = active ? canvas : get('exit-fullscreen');
+    target.focus({ preventScroll: true });
+  } else if (fullscreenFromKeyboard || !active) {
+    fullscreen.focus({ preventScroll: true });
+  } else {
+    canvas.focus({ preventScroll: true });
+  }
+});
 document.addEventListener('visibilitychange', () => {
   clearTransient();
   flushSave();

@@ -11,14 +11,21 @@ const secondPressColor = [66, 64, 255];
 
 async function coreReady(page) {
   await page.goto('./');
-  await expect(page.getByRole('button', { name: 'Open ROM', exact: true })).toBeEnabled();
+  await expect(page.getByRole('button', { name: 'Insert cartridge', exact: true })).toBeEnabled();
+}
+
+async function openCartridges(page) {
+  await page.getByRole('button', { name: /^(Insert|Change) cartridge$/ }).click();
+  await expect(page.getByRole('dialog', { name: 'Cartridges' })).toBeVisible();
 }
 
 async function choose(page, name) {
+  await openCartridges(page);
   const chooser = page.waitForEvent('filechooser');
   await page.getByRole('button', { name: 'Open local ROM' }).click();
   await (await chooser).setFiles(fixture(name));
   await expect(page.getByRole('button', { name: 'Pause', exact: true })).toBeEnabled();
+  await expect(page.getByRole('dialog', { name: 'Cartridges' })).toBeHidden();
 }
 
 function color(page) {
@@ -96,11 +103,17 @@ test('production subpath, empty startup, picker, rejection, cancellation and swi
   const assets = ['', 'style.css', 'main.js', 'controls.js', 'storage.js', 'audio.js', 'wasm.js', 'nes_wasm.wasm']
     .map(name => new URL(name, appUrl).href).sort();
   expect(requests.map(request => request.url).sort()).toEqual(assets);
-  await expect(page.getByText('None inserted')).toBeVisible();
+  await expect(page.locator('#inserted')).toHaveText('None');
   await expect(page.getByRole('button', { name: 'Play', exact: true })).toBeDisabled();
+  await expect(page.locator('#display')).toHaveValue('crt');
+  await expect(page.locator('#scale')).toHaveValue('3');
+  await expect(page.getByRole('slider', { name: 'Volume' })).toHaveValue('100');
   await expect(page.locator('canvas')).toHaveJSProperty('width', 256);
   await expect(page.locator('canvas')).toHaveJSProperty('height', 240);
+  await openCartridges(page);
   await expect(page.locator('#library li')).toHaveCount(0);
+  await page.keyboard.press('Escape');
+  await expect(page.getByRole('dialog', { name: 'Cartridges' })).toBeHidden();
 
   await choose(page);
   await seeColor(page, originalColor);
@@ -132,7 +145,7 @@ test('production subpath, empty startup, picker, rejection, cancellation and swi
   expect(requests.every(request => request.method === 'GET' && request.body === null)).toBe(true);
 });
 
-test('playback, controls, display, real audio and hidden-tab suspension', async ({ page, context }) => {
+test('playback, controls, display, real audio and hidden-tab suspension', async ({ page }) => {
   await instrumentDevices(page);
   await coreReady(page);
   await choose(page);
@@ -147,16 +160,6 @@ test('playback, controls, display, real audio and hidden-tab suspension', async 
   await page.evaluate(() => { window.gamepadButtons[14].pressed = false; });
   await seeColor(page, originalColor);
 
-  const client = await context.newCDPSession(page);
-  await page.locator('#dpad').scrollIntoViewIfNeeded();
-  const box = await page.locator('#dpad').boundingBox();
-  await client.send('Input.dispatchTouchEvent', {
-    type: 'touchStart', touchPoints: [{ x: box.x + box.width * .85, y: box.y + box.height * .15 }],
-  });
-  await seeColor(page, [136, 216, 0]);
-  await client.send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] });
-  await seeColor(page, originalColor);
-
   await page.locator('#scale').selectOption('1');
   await expect(page.locator('canvas')).toHaveCSS('width', '256px');
   await page.locator('#scale').selectOption('2');
@@ -168,15 +171,20 @@ test('playback, controls, display, real audio and hidden-tab suspension', async 
   await expect(page.locator('canvas')).toHaveCSS('image-rendering', 'pixelated');
 
   await page.getByRole('button', { name: 'Fullscreen', exact: true }).click();
-  await expect.poll(() => page.evaluate(() => document.fullscreenElement?.id)).toBe('screen');
+  await expect.poll(() => page.evaluate(() => document.fullscreenElement?.id)).toBe('game-presentation');
+  await expect(page.getByRole('group', { name: 'On-screen NES controller' })).toBeHidden();
   await page.getByRole('button', { name: 'Exit fullscreen' }).click();
   await expect.poll(() => page.evaluate(() => document.fullscreenElement)).toBe(null);
+  await expect(page.locator('canvas')).toBeFocused();
 
   await page.getByRole('button', { name: 'Mute', exact: true }).click();
   await expect(page.getByRole('button', { name: 'Unmute' })).toHaveAttribute('aria-pressed', 'true');
+  await expect(page.getByRole('slider', { name: 'Volume' })).toHaveValue('0');
   await expect.poll(() => page.evaluate(() => window.audioPeak())).toBeLessThan(.001);
   await page.getByRole('slider', { name: 'Volume' }).fill('23');
+  await page.getByRole('button', { name: 'Mute', exact: true }).click();
   await page.getByRole('button', { name: 'Unmute' }).click();
+  await expect(page.getByRole('slider', { name: 'Volume' })).toHaveValue('23');
   await expect.poll(() => page.evaluate(() => window.audioProbe.gain.gain.value)).toBeCloseTo(.23);
   await expect.poll(() => page.evaluate(() => window.audioPeak())).toBeGreaterThan(.01);
 
@@ -201,10 +209,64 @@ test('playback, controls, display, real audio and hidden-tab suspension', async 
   await key(page, 'x', pressColor);
   await page.getByRole('button', { name: 'Reset', exact: true }).click();
   await seeColor(page, pressColor);
-  await page.getByRole('button', { name: 'Controls', exact: true }).click();
-  await expect(page.getByRole('dialog')).toBeVisible();
-  await page.getByRole('button', { name: 'Close', exact: true }).click();
-  await expect(page.getByRole('dialog')).not.toBeVisible();
+  await page.locator('#help summary').click();
+  await expect(page.getByRole('group', { name: 'Controls reference' })).toBeVisible();
+  await page.keyboard.press('Escape');
+  await expect(page.getByRole('group', { name: 'Controls reference' })).toBeHidden();
+});
+
+test.describe('coarse-pointer player', () => {
+  test.use({ hasTouch: true, isMobile: true, viewport: { width: 844, height: 390 } });
+
+  test('landscape D-pad fits beside the video and touch works in both fullscreen orientations', async ({ page, context }) => {
+    await coreReady(page);
+    expect(await page.evaluate(() => matchMedia('(pointer: coarse)').matches)).toBe(true);
+    await choose(page);
+    await seeColor(page, originalColor);
+    const dpad = page.locator('#dpad');
+    const canvas = page.locator('canvas');
+    const client = await context.newCDPSession(page);
+
+    async function touchDiagonal() {
+      const box = await dpad.boundingBox();
+      const { width, height } = page.viewportSize();
+      expect(box.x).toBeGreaterThanOrEqual(0);
+      expect(box.y).toBeGreaterThanOrEqual(0);
+      expect(box.x + box.width).toBeLessThanOrEqual(width);
+      expect(box.y + box.height).toBeLessThanOrEqual(height);
+      await client.send('Input.dispatchTouchEvent', {
+        type: 'touchStart', touchPoints: [{ x: box.x + box.width * .85, y: box.y + box.height * .15 }],
+      });
+      await seeColor(page, [136, 216, 0]);
+      await client.send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] });
+      await seeColor(page, originalColor);
+    }
+
+    expect(await page.evaluate(() => scrollY)).toBe(0);
+    const landscapePad = await dpad.boundingBox();
+    const landscapeVideo = await canvas.boundingBox();
+    expect(landscapePad.x + landscapePad.width).toBeLessThan(landscapeVideo.x);
+    expect(landscapePad.y).toBeLessThan(landscapeVideo.y + landscapeVideo.height);
+    await touchDiagonal();
+
+    const enter = page.getByRole('button', { name: 'Fullscreen', exact: true });
+    const exit = page.getByRole('button', { name: 'Exit fullscreen', exact: true });
+    await enter.tap();
+    await expect(page.locator(':fullscreen #dpad')).toBeVisible();
+    await touchDiagonal();
+    await exit.tap();
+    await expect(page.locator(':fullscreen')).toHaveCount(0);
+
+    await page.setViewportSize({ width: 390, height: 844 });
+    await enter.tap();
+    await expect(page.locator(':fullscreen #dpad')).toBeVisible();
+    const portraitPad = await dpad.boundingBox();
+    const portraitVideo = await canvas.boundingBox();
+    expect(portraitPad.y).toBeGreaterThanOrEqual(portraitVideo.y + portraitVideo.height - 1);
+    await touchDiagonal();
+    await exit.tap();
+    await expect(page.locator(':fullscreen')).toHaveCount(0);
+  });
 });
 
 test('remembered ROMs, saves per identity, reset, removal and preferences', async ({ page }) => {
@@ -221,6 +283,7 @@ test('remembered ROMs, saves per identity, reset, removal and preferences', asyn
   // Give the cartridge a frame with the button released before the next rising edge.
   await key(page, 'ArrowRight', [100, 176, 255]);
   await key(page, 'x', secondPressColor);
+  await openCartridges(page);
   await page.getByRole('button', { name: 'diagnostic.nes', exact: true }).click();
   await seeColor(page, pressColor);
   await page.locator('#scale').selectOption('3');
@@ -228,14 +291,16 @@ test('remembered ROMs, saves per identity, reset, removal and preferences', asyn
   await page.getByRole('button', { name: 'Mute', exact: true }).click();
 
   await page.reload();
-  await expect(page.getByText('None inserted')).toBeVisible();
+  await expect(page.locator('#inserted')).toHaveText('None');
   await expect(page.locator('#scale')).toHaveValue('3');
   await expect(page.locator('#display')).toHaveValue('crt');
   await expect(page.getByRole('button', { name: 'Unmute' })).toBeVisible();
+  await openCartridges(page);
   await page.getByRole('button', { name: 'diagnostic-alternate.nes', exact: true }).click();
   await seeColor(page, secondPressColor);
+  await openCartridges(page);
   await page.getByRole('button', { name: 'Remove diagnostic.nes', exact: true }).click();
-  await expect(page.getByRole('button', { name: 'diagnostic.nes', exact: true })).toHaveCount(0);
+  await expect(page.locator('#library li')).toHaveCount(1);
   await page.reload();
   await expect(page.locator('#library li')).toHaveCount(1);
   await choose(page);

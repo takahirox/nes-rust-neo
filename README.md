@@ -18,7 +18,7 @@ Open the URL printed by the server. It serves the build at [http://127.0.0.1:417
 
 ## Play
 
-Choose **Open ROM** and select a legally obtained local `.nes` file. A successful load starts playback. Use **Play** or **Pause** to control execution and **Reset** to restart the current cartridge with its battery RAM intact. **Scale**, **Display**, **Fullscreen**, **Mute** and **Volume** adjust the presentation.
+Choose **Insert cartridge**, then **Open local ROM…**, and select a legally obtained local `.nes` file. A successful load starts playback. Use **Play** or **Pause** to control execution and **Reset** to restart the current cartridge with its battery RAM intact. The initial display is **CRT** at up to **3×** scale, with volume at 100%. **Help** opens the keyboard reference.
 
 | NES control | Keyboard | Standard gamepad |
 | --- | --- | --- |
@@ -28,9 +28,9 @@ Choose **Open ROM** and select a legally obtained local `.nes` file. A successfu
 | Start | Enter | Start |
 | Select | Either Shift | Back / Select |
 
-The on-screen controller supports simultaneous touch buttons and sliding diagonals. Keyboard and touch control player 1. A second standard gamepad controls player 2. Pause, window focus loss and hidden tabs release held input. Hidden tabs suspend emulation and audio. Use a button or key gesture to activate audio if the browser requires it.
+The on-screen controller supports simultaneous touch buttons and sliding diagonals. It sits beside the video on short landscape screens and stays available in fullscreen on touch devices. Keyboard and touch control player 1. A second standard gamepad controls player 2. Pause, window focus loss and hidden tabs release held input. Hidden tabs suspend emulation and audio. Use a button or key gesture to activate audio if the browser requires it.
 
-Successfully imported cartridges appear under **Cartridges**. Select a remembered entry to insert it again. **Remove** forgets the library entry and retains its battery save. The browser keys saves by SHA-256 over the original ROM bytes. If a save cannot be restored or has changed in another tab, the app protects the existing data and offers **Retry save storage**. A write failure keeps pending progress in the open tab until storage recovers. Retrying a blocked restoration loads the existing save in place of temporary progress and restarts the active cartridge.
+Successfully imported cartridges appear under **My cartridges** in the **Insert cartridge** or **Change cartridge** picker. Select a remembered entry to insert it again. **Remove** forgets the library entry and retains its battery save. The browser keys saves by SHA-256 over the original ROM bytes. If a save cannot be restored or has changed in another tab, the app protects the existing data and offers **Retry save storage**. A write failure keeps pending progress in the open tab until storage recovers. Retrying a blocked restoration loads the existing save in place of temporary progress and restarts the active cartridge.
 
 ROMs, names, saves and preferences are stored in the browser. Clearing site data removes the library, saves and preferences. The app requests only its own static assets. The build contains no cartridges or game downloads.
 
