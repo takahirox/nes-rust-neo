@@ -104,9 +104,10 @@ async function deliver(page, initialFrame) {
 
 async function changeSide(page, side) {
   const select = page.getByLabel('Disk side');
+  await select.focus();
   await select.selectOption(String(side - 1));
   await expect(page.locator('#disk-status')).toHaveText('Inserted');
-  await page.locator('canvas').focus();
+  await expect(page.locator('canvas')).toBeFocused();
   await waitRam(page, 0x10, side);
 }
 
@@ -132,6 +133,32 @@ function diskStorage(page, key) {
       tx.onabort = () => { db.close(); reject(tx.error); };
     };
   }), key);
+}
+
+async function injectDiskFailures(page) {
+  await page.addInitScript(() => {
+    for (const method of ['get', 'put']) {
+      const original = IDBObjectStore.prototype[method];
+      IDBObjectStore.prototype[method] = function (...args) {
+        const key = args[method === 'get' ? 0 : 1];
+        if (this.name === 'data' && key?.startsWith?.('fds-') && method === 'get' && window.failDisk === 'corrupt') {
+          return original.call(this, 'malformed-disk-save');
+        }
+        if (this.name === 'data' && key?.startsWith?.('fds-') && window.failDisk === method) {
+          throw new DOMException('Injected disk storage failure', 'QuotaExceededError');
+        }
+        return original.apply(this, args);
+      };
+    }
+  });
+}
+
+async function retryDiskWrite(retry) {
+  // Keep automatic saves failing until the retry click reaches the button.
+  await retry.evaluate(element => {
+    element.addEventListener('click', () => { delete window.failDisk; }, { capture: true, once: true });
+  });
+  await retry.click();
 }
 
 test('one picker validates media and manages a local BIOS without disrupting the current game', async ({ page }) => {
@@ -284,21 +311,7 @@ test('guest video, side progression and exact disk writes survive reset, removal
 });
 
 test('disk storage failures and concurrent tabs preserve the active game and allow retry', async ({ page, context }) => {
-  await page.addInitScript(() => {
-    for (const method of ['get', 'put']) {
-      const original = IDBObjectStore.prototype[method];
-      IDBObjectStore.prototype[method] = function (...args) {
-        const key = args[method === 'get' ? 0 : 1];
-        if (this.name === 'data' && key?.startsWith?.('fds-') && method === 'get' && window.failDisk === 'corrupt') {
-          return original.call(this, 'malformed-disk-save');
-        }
-        if (this.name === 'data' && key?.startsWith?.('fds-') && window.failDisk === method) {
-          throw new DOMException('Injected disk storage failure', 'QuotaExceededError');
-        }
-        return original.apply(this, args);
-      };
-    }
-  });
+  await injectDiskFailures(page);
   const id = await saveKey(multi);
   await ready(page);
   await loadFile(page, nes);
@@ -328,8 +341,7 @@ test('disk storage failures and concurrent tabs preserve the active game and all
   await expect(other.locator('#inserted')).toHaveText('None');
 
   await page.bringToFront();
-  await page.evaluate(() => { delete window.failDisk; });
-  await button(page, 'Retry save storage').click();
+  await retryDiskWrite(button(page, 'Retry save storage'));
   await expect(page.locator('#warnings')).toBeHidden();
   expect(await diskStorage(page, id)).toEqual([0x12, 0x22, 0x33]);
   await loadFile(page, nes);
@@ -354,6 +366,44 @@ test('disk storage failures and concurrent tabs preserve the active game and all
   await loaded(other, multi);
   await booted(other);
   expect(await peek(other, 0x12)).toBe(0x12);
+});
+
+test('fullscreen disk changes preserve keyboard play and failed saves can be retried in place', async ({ page }) => {
+  await injectDiskFailures(page);
+  const id = await saveKey(multi);
+  await ready(page);
+  await loadFile(page, multi);
+  await localBios(page);
+  await loaded(page, multi);
+  await booted(page);
+  await button(page, 'Fullscreen').click();
+  const fullscreen = page.locator('#game-presentation:fullscreen');
+  await expect(fullscreen).toBeVisible();
+
+  await changeSide(page, 2);
+  await page.evaluate(() => { window.failDisk = 'put'; });
+  await deliver(page);
+  expect(await peek(page, 0x12)).toBe(0x23);
+  const warning = fullscreen.locator('#fullscreen-disk-warning');
+  await expect(warning).toBeInViewport({ ratio: 1 });
+  await expect(warning).toHaveText(/Could not save disk changes.*keep this tab open and retry save storage/i);
+  expect(await diskStorage(page, id)).toBeUndefined();
+  const retry = button(fullscreen, 'Retry save storage');
+  await expect(retry).toBeInViewport({ ratio: 1 });
+  await retryDiskWrite(retry);
+  await expect(warning).toBeHidden();
+  await expect(retry).toBeHidden();
+  await expect(fullscreen).toBeVisible();
+  expect(await diskStorage(page, id)).toEqual([0x11, 0x23, 0x33]);
+
+  await button(page, 'Exit fullscreen').click();
+  await expect(fullscreen).toHaveCount(0);
+  await page.reload();
+  await remembered(page, multi);
+  await loaded(page, multi);
+  await booted(page);
+  await changeSide(page, 2);
+  expect(await peek(page, 0x12)).toBe(0x23);
 });
 
 for (const layout of [

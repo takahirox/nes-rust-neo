@@ -55,6 +55,9 @@ function warn(category, message) {
   if (get('warnings').textContent !== text) get('warnings').textContent = text;
   get('warnings').hidden = parts.length === 0;
   get('retry-save').hidden = Boolean(pendingGame?.conflict) || (!pendingGame && !saveWarning);
+  const fullscreenWarning = get('fullscreen-disk-warning');
+  if (fullscreenWarning.textContent !== diskWarning) fullscreenWarning.textContent = diskWarning;
+  get('fullscreen-disk-save').hidden = !diskWarning;
 }
 
 function soundError(error) {
@@ -81,7 +84,7 @@ function syncUI() {
   get('reset').disabled = !active || busy;
   gameButton.disabled = !core || busy;
   get('open-file').disabled = !core || busy;
-  get('retry-save').disabled = busy;
+  get('retry-save').disabled = get('fullscreen-retry-disk').disabled = busy;
   get('save-choices').disabled = busy;
   diskSide.disabled = diskToggle.disabled = busy;
   biosButton.disabled = get('forget-bios').disabled = get('cancel-bios').disabled = busy;
@@ -273,6 +276,7 @@ function selectDisk(side) {
   if (busy || !active?.diskSave || !core.selectDisk(side ?? -1)) return;
   active.requestedSide = side;
   showDiskState();
+  if (enabled()) canvas.focus({ preventScroll: true });
   flushDisk(true);
 }
 
@@ -500,6 +504,11 @@ get('reset').onclick = () => {
   flushSave();
   restart();
 };
+async function retryDiskSave() {
+  await active.diskSave.finish(core);
+  warn('save', '');
+}
+get('fullscreen-retry-disk').onclick = () => operate(retryDiskSave);
 get('retry-save').onclick = () => {
   if (pendingGame) unlockAudio();
   operate(async () => {
@@ -508,8 +517,8 @@ get('retry-save').onclick = () => {
       await insert(record, rememberImport);
       return;
     }
-    await flushSave();
-    await active?.diskSave?.finish(core);
+    if (active?.diskSave) await retryDiskSave();
+    else await flushSave();
     if (await saves.retry(active?.save, core)) {
       restart();
       if (running) notice('Battery save restored. Game restarted.');
