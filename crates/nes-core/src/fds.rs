@@ -152,7 +152,8 @@ impl Drive {
             }
         }
         let side = self.inserted?;
-        if self.control & 1 == 0 || (self.control & 2 != 0 && !self.ready) {
+        // The drive runs with reset released (bit 0) and motor stop clear (bit 1).
+        if self.control & 3 != 1 {
             return None;
         }
         self.delay -= 1;
@@ -357,7 +358,7 @@ impl Fds {
             0x6000..=0xdfff => self.prg[usize::from(addr - 0x6000)],
             0xe000..=0xffff => self.bios[usize::from(addr - 0xe000)],
             0x4040..=0x4092 if self.io & 2 != 0 => self.audio.read(addr, open),
-            0x4030..=0x4033 if self.io & 1 != 0 => match addr {
+            0x4030..=0x4033 => match addr {
                 0x4030 => {
                     let status = (open & 0x24)
                         | u8::from(self.timer.irq)
@@ -408,13 +409,16 @@ impl Fds {
                     self.drive.control = 0x06;
                     self.drive.rewind();
                 }
+                if self.io & 2 == 0 {
+                    self.audio.reset_output();
+                }
             }
             0x4024 if self.io & 1 != 0 => {
                 self.drive.output = value;
                 self.drive.acknowledge_transfer();
             }
             0x4025 if self.io & 1 != 0 => {
-                if value & 1 == 0 || self.drive.control & 1 == 0 {
+                if value & 3 != 1 || self.drive.control & 1 == 0 {
                     self.drive.rewind();
                 }
                 if value & 0x14 == 0x14 && self.drive.control & 0x10 == 0 {
@@ -559,7 +563,7 @@ mod tests {
     fn disk_register_timing_crc_and_ejection() {
         let mut fds = board();
         fds.cpu_write(0x4025, 0xc5);
-        assert_eq!(fds.cpu_read(0x4032, 0x58), 0x58);
+        assert_eq!(fds.cpu_read(0x4032, 0x58), 0x5a);
         fds.cpu_write(0x4023, 1);
         fds.cpu_write(0x4025, 0xc7);
         clock(&mut fds, SPINUP_CYCLES);
@@ -611,6 +615,65 @@ mod tests {
         clock(&mut fds, 1);
         assert_eq!(fds.inserted(), Some(1));
         assert_eq!(fds.cpu_read(0x4032, 0) & 7, 2);
+    }
+
+    #[test]
+    fn stopping_a_ready_drive_halts_reads_and_writes_until_restart() {
+        let mut fds = board();
+        let original = fds.save().to_vec();
+        let first_block_cycles = (LEAD_GAP as u32 + 1) * BYTE_CYCLES;
+
+        fds.cpu_write(0x4023, 1);
+        fds.cpu_write(0x4025, 0xe5);
+        clock(&mut fds, SPINUP_CYCLES);
+        assert_eq!(fds.cpu_read(0x4032, 0) & 7, 0);
+        fds.cpu_write(0x4025, 0xe7);
+        assert_eq!(fds.cpu_read(0x4032, 0) & 7, 2);
+        clock(&mut fds, SPINUP_CYCLES + first_block_cycles);
+        assert!(!fds.irq());
+        assert_eq!(fds.cpu_read(0x4030, 0) & 0x80, 0);
+        assert_eq!(fds.cpu_read(0x4031, 0), 0);
+
+        fds.cpu_write(0x4025, 0xe5);
+        clock(&mut fds, SPINUP_CYCLES - 1);
+        assert_eq!(fds.cpu_read(0x4032, 0) & 7, 2);
+        clock(&mut fds, 1 + first_block_cycles);
+        assert!(fds.irq());
+        assert_eq!(fds.cpu_read(0x4031, 0), DISK_SIGNATURE[0]);
+
+        fds.cpu_write(0x4025, 0xe3);
+        fds.cpu_write(0x4024, 0xa5);
+        assert_eq!(fds.cpu_read(0x4032, 0) & 7, 2);
+        clock(&mut fds, SPINUP_CYCLES + first_block_cycles);
+        assert!(!fds.irq());
+        assert_eq!(fds.revision(), 0);
+        assert_eq!(fds.save(), original);
+
+        fds.cpu_write(0x4025, 0xe1);
+        clock(&mut fds, SPINUP_CYCLES);
+        assert!(fds.irq());
+        assert_eq!(fds.revision(), 1);
+        assert_eq!(fds.save()[0], 0xa5);
+    }
+
+    #[test]
+    fn drive_status_reports_media_across_disk_io_toggles() {
+        let mut fds = board();
+        for enable in [1, 0] {
+            fds.cpu_write(0x4023, enable);
+            assert_eq!(fds.cpu_read(0x4032, 0x58), 0x5a);
+        }
+
+        fds.eject();
+        assert_eq!(fds.cpu_read(0x4032, 0x58), 0x5f);
+        for enable in [1, 0] {
+            fds.cpu_write(0x4023, enable);
+            assert_eq!(fds.cpu_read(0x4032, 0x58), 0x5f);
+        }
+
+        assert!(fds.insert(1));
+        clock(&mut fds, CHANGE_CYCLES);
+        assert_eq!(fds.cpu_read(0x4032, 0x58), 0x5a);
     }
 
     #[test]
@@ -710,5 +773,41 @@ mod tests {
         assert!((apu.audio()[0] - expected).abs() < 0.000_001);
         fds.cpu_write(0x4023, 0);
         assert_eq!(fds.tick(), 0.0);
+    }
+
+    #[test]
+    fn audio_reset_clears_gain_and_phase_until_envelope_is_programmed() {
+        let mut fds = board();
+        fds.cpu_write(0x4023, 3);
+        fds.cpu_write(0x4089, 0x80);
+        for addr in 0x4040..=0x407f {
+            fds.cpu_write(addr, 32);
+        }
+        fds.cpu_write(0x4040, 63);
+        fds.cpu_write(0x4089, 0);
+        fds.cpu_write(0x4080, 0xa0);
+        fds.cpu_write(0x4080, 0x40);
+        fds.cpu_write(0x408a, 1);
+        fds.cpu_write(0x4082, 0xff);
+        fds.cpu_write(0x4083, 0x0f);
+        assert!(fds.tick() > 0.0);
+        clock(&mut fds, 16);
+        assert_eq!(fds.cpu_read(0x4040, 0), 32);
+        assert_eq!(fds.cpu_read(0x4090, 0), 32);
+
+        fds.cpu_write(0x4023, 1);
+        assert_eq!(fds.tick(), 0.0);
+        clock(&mut fds, 150_000);
+        fds.cpu_write(0x4023, 3);
+        assert_eq!(fds.cpu_read(0x4090, 0), 0);
+        assert_eq!(fds.cpu_read(0x4040, 0), 63);
+        for _ in 0..32 {
+            assert_eq!(fds.tick(), 0.0);
+        }
+        assert_eq!(fds.cpu_read(0x4090, 0), 0);
+
+        fds.cpu_write(0x4080, 0xa0);
+        assert_eq!(fds.cpu_read(0x4090, 0), 32);
+        assert!(fds.tick() > 0.0);
     }
 }
