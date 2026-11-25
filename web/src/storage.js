@@ -1,5 +1,6 @@
 export const preferencesKey = 'nes-rust-neo/preferences-v1';
 const savePrefix = 'nes-rust-neo/battery-v1/';
+const draftPrefix = 'nes-rust-neo/battery-draft-v1/';
 
 export async function identify(bytes) {
   const digest = await crypto.subtle.digest('SHA-256', bytes);
@@ -87,66 +88,98 @@ function encode(bytes) {
 export class BatterySaves {
   #sessions = new Map();
 
-  get hasWarnings() {
-    return Array.from(this.#sessions.values()).some(session => session.message);
-  }
-
   get warning() {
-    return Array.from(this.#sessions.values(), session => session.message).filter(Boolean).join(' ');
+    return Array.from(this.#sessions.values(), session => {
+      const memoryOnly = session.pending && session.pending !== session.staged;
+      if (session.blocked) {
+        const detail = memoryOnly ? ' Progress is held in this tab.' : '';
+        return `The battery save for ${session.name} changed in another tab.${detail} Retry to load the stored version.`;
+      }
+      if (session.writeFailed || memoryOnly) {
+        const detail = memoryOnly ? 'Progress is held in this tab.' : 'Reopen the cartridge in this tab to recover progress after reload.';
+        return `Could not finish saving battery data for ${session.name}. ${detail}`;
+      }
+      return '';
+    }).filter(Boolean).join(' ');
   }
 
   open(id, name, size, core) {
     if (!size) return null;
     const cached = this.#sessions.get(id);
     if (cached?.pending) {
-      if (!core.restore(cached.pending, true)) throw new Error('Core rejected battery save.');
+      if (!core.restore(decode(cached.pending.raw, size), true)) throw new Error('Core rejected battery save.');
       cached.name = name;
       return cached;
     }
     const base = localStorage.getItem(savePrefix + id);
-    const bytes = decode(base, size);
+    const storedBytes = decode(base, size);
+    const draft = JSON.parse(sessionStorage.getItem(draftPrefix + id));
+    if (draft !== null && (typeof draft.raw !== 'string' || (draft.base !== null && typeof draft.base !== 'string'))) {
+      throw new Error('Battery save recovery data is invalid.');
+    }
+    const bytes = draft ? decode(draft.raw, size) : storedBytes;
     if (bytes && !core.restore(bytes, true)) throw new Error('Core rejected battery save.');
-    const session = { id, name, size, revision: 0, pending: null, base, blocked: false, writing: null, message: '' };
+    const blocked = Boolean(draft && base !== draft.base && base !== draft.raw);
+    const session = {
+      id, name, size, revision: 0, pending: draft, staged: draft,
+      base: blocked ? draft.base : base, blocked, writing: null, writeFailed: false,
+    };
     this.#sessions.set(id, session);
     return session;
   }
 
   capture(session, core) {
-    if (!session || session.revision === core.saveRevision()) return;
-    session.revision = core.saveRevision();
-    session.pending = core.saveBytes();
+    if (!session) return;
+    const revision = core.saveRevision();
+    if (session.revision === revision) return;
+    session.revision = revision;
+    session.pending = { base: session.base, raw: encode(core.saveBytes()) };
   }
 
   flush(session) {
-    if (!session) return;
+    if (!session?.pending) return;
+    // Save synchronously before queueing a lock, including during pagehide.
+    // Session storage survives reload and keeps each tab's draft separate.
+    if (session.staged !== session.pending) {
+      try {
+        sessionStorage.setItem(draftPrefix + session.id, JSON.stringify(session.pending));
+        session.staged = session.pending;
+      } catch {
+        // Keep the draft in memory and still attempt the shared save.
+      }
+    }
     if (session.writing) return session.writing;
-    if (!session.pending || session.blocked) return;
+    if (session.blocked) return;
     session.writing = this.#write(session).finally(() => { session.writing = null; });
     return session.writing;
+  }
+
+  #clearDraft(session) {
+    if (session.staged) sessionStorage.removeItem(draftPrefix + session.id);
+    session.pending = session.staged = null;
+    session.writeFailed = false;
   }
 
   async #write(session) {
     try {
       const key = savePrefix + session.id;
-      // Keep the comparison and write under the same origin-wide lock. Encode
-      // the latest capture after acquiring it in case play continued while waiting.
+      // Compare and write under the same origin-wide lock, using the latest
+      // capture in case play continued while waiting.
       while (session.pending && !session.blocked) {
         await navigator.locks.request(key, () => {
-          const raw = encode(session.pending);
+          const { raw } = session.pending;
           const stored = localStorage.getItem(key);
           if (stored !== session.base && stored !== raw) {
             session.blocked = true;
-            session.message = `The battery save for ${session.name} changed in another tab. Retry to load the stored version.`;
             return;
           }
           if (stored !== raw) localStorage.setItem(key, raw);
           session.base = raw;
-          session.pending = null;
-          session.message = '';
+          this.#clearDraft(session);
         });
       }
     } catch {
-      session.message = `Could not write the battery save for ${session.name}. Progress is held in this tab.`;
+      session.writeFailed = true;
     }
   }
 
@@ -159,15 +192,14 @@ export class BatterySaves {
           const raw = localStorage.getItem(savePrefix + session.id);
           const bytes = decode(raw, session.size);
           if (bytes) {
-            if (session === active) {
-              if (!core.restore(bytes)) throw new Error('Core rejected battery save.');
-              restored = true;
-            }
-            session.pending = null;
+            if (session === active && !core.restore(bytes)) throw new Error('Core rejected battery save.');
+            this.#clearDraft(session);
+            if (session === active) restored = true;
+          } else {
+            session.pending = { base: raw, raw: session.pending.raw };
           }
           session.base = raw;
           session.blocked = false;
-          session.message = '';
         } catch {
           continue;
         }

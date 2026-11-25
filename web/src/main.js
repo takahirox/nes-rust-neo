@@ -38,11 +38,12 @@ function notice(message) {
 function warn(category, message) {
   if (message) warnings.set(category, message);
   else warnings.delete(category);
-  const parts = [...warnings.values(), saves.warning].filter(Boolean);
+  const saveWarning = saves.warning;
+  const parts = [...warnings.values(), saveWarning].filter(Boolean);
   const text = parts.join(' ');
   if (get('warnings').textContent !== text) get('warnings').textContent = text;
   get('warnings').hidden = parts.length === 0;
-  get('retry-save').hidden = !pendingCartridge && !saves.hasWarnings;
+  get('retry-save').hidden = !pendingCartridge && !saveWarning;
 }
 
 function soundError(error) {
@@ -76,8 +77,12 @@ function syncUI() {
 
 async function flushSave() {
   saves.capture(active?.save, core);
-  await saves.flush(active?.save);
+  const writing = saves.flush(active?.save);
   warn('save', '');
+  if (writing) {
+    await writing;
+    warn('save', '');
+  }
 }
 
 function updateScanlines(height) {

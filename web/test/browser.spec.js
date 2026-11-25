@@ -33,6 +33,34 @@ function color(page) {
     [...canvas.getContext('2d').getImageData(75, 100, 1, 1).data].slice(0, 3));
 }
 
+async function batteryKey(name) {
+  const hash = createHash('sha256').update(await readFile(fixture(name))).digest('hex');
+  return 'nes-rust-neo/battery-v1/' + hash;
+}
+
+function savedValue(page, key) {
+  return page.evaluate(key => {
+    const raw = localStorage.getItem(key);
+    return raw === null ? null : atob(raw).charCodeAt(0);
+  }, key);
+}
+
+async function holdSaveLock(page, key) {
+  await page.evaluate(key => new Promise(resolve => {
+    void navigator.locks.request(key, () => new Promise(release => {
+      window.releaseSaveLock = release;
+      resolve();
+    }));
+  }), key);
+}
+
+function queuedSaveWrites(page, key) {
+  return page.evaluate(async key => {
+    const { pending } = await navigator.locks.query();
+    return pending.filter(lock => lock.name === key).length;
+  }, key);
+}
+
 async function seeColor(page, rgb) {
   await expect.poll(() => color(page)).toEqual(rgb);
 }
@@ -354,8 +382,7 @@ test('failed save restore preserves the paused cartridge and retry inserts the c
   await key(page, 'x', pressColor);
   await page.getByRole('button', { name: 'Pause', exact: true }).click();
 
-  const hash = createHash('sha256').update(await readFile(fixture('diagnostic-alternate'))).digest('hex');
-  const storageKey = 'nes-rust-neo/battery-v1/' + hash;
+  const storageKey = await batteryKey('diagnostic-alternate');
   const bytes = Buffer.alloc(8192);
   bytes[0] = 2;
   const encoded = bytes.toString('base64');
@@ -379,6 +406,83 @@ test('failed save restore preserves the paused cartridge and retry inserts the c
   await expect(page.locator('#library li')).toHaveCount(2);
 });
 
+test('the first battery change survives an immediate reload', async ({ page }) => {
+  await coreReady(page);
+  await choose(page);
+  await seeColor(page, originalColor);
+  const storageKey = await batteryKey();
+  expect(await savedValue(page, storageKey)).toBeNull();
+  // Reload as soon as the diagnostic renders its first changed save value.
+  await page.evaluate(rgb => {
+    const draw = CanvasRenderingContext2D.prototype.putImageData;
+    CanvasRenderingContext2D.prototype.putImageData = function (image, ...args) {
+      draw.call(this, image, ...args);
+      const pixel = (100 * image.width + 75) * 4;
+      if (rgb.every((channel, index) => image.data[pixel + index] === channel)) location.reload();
+    };
+  }, pressColor);
+  const reloaded = page.waitForEvent('load');
+  await page.keyboard.down('x');
+  await reloaded;
+  await page.keyboard.up('x');
+  await openCartridges(page);
+  await page.getByRole('button', { name: 'diagnostic.nes', exact: true }).click();
+  await seeColor(page, pressColor);
+  await expect.poll(() => savedValue(page, storageKey)).toBe(1);
+  await expect(page.locator('#warnings')).toBeHidden();
+});
+
+for (const competingSave of [false, true]) {
+  const outcome = competingSave ? 'keeps the competing save protected' : 'commits the recovered progress';
+  test(`reload with a queued battery write ${outcome}`, async ({ page, context }) => {
+    await coreReady(page);
+    await choose(page);
+    await seeColor(page, originalColor);
+    const storageKey = await batteryKey();
+    await key(page, 'x', pressColor);
+    await expect.poll(() => savedValue(page, storageKey)).toBe(1);
+
+    const other = await context.newPage();
+    await coreReady(other);
+    await holdSaveLock(other, storageKey);
+    try {
+      await page.bringToFront();
+      await page.locator('canvas').focus();
+      await key(page, 'ArrowRight', [100, 176, 255]);
+      await key(page, 'x', secondPressColor);
+      await page.getByRole('button', { name: 'Pause', exact: true }).click();
+      await expect.poll(() => queuedSaveWrites(other, storageKey)).toBe(1);
+      expect(await savedValue(other, storageKey)).toBe(1);
+
+      await page.reload();
+      await expect.poll(() => queuedSaveWrites(other, storageKey)).toBe(0);
+      if (competingSave) {
+        // Simulate a write by the other tab while it owns the save lock.
+        await other.evaluate(key => localStorage.setItem(key, btoa('\0'.repeat(8192))), storageKey);
+      }
+    } finally {
+      await other.evaluate(() => window.releaseSaveLock());
+    }
+
+    await openCartridges(page);
+    await page.getByRole('button', { name: 'diagnostic.nes', exact: true }).click();
+    await seeColor(page, secondPressColor);
+    if (competingSave) {
+      await expect(page.locator('#warnings')).toHaveText(/changed in another tab/);
+      expect(await savedValue(other, storageKey)).toBe(0);
+      await page.getByRole('button', { name: 'Retry save storage' }).click();
+      await seeColor(page, originalColor);
+      await page.reload();
+      await openCartridges(page);
+      await page.getByRole('button', { name: 'diagnostic.nes', exact: true }).click();
+      await seeColor(page, originalColor);
+    } else {
+      await expect.poll(() => savedValue(other, storageKey)).toBe(2);
+    }
+    await expect(page.locator('#warnings')).toBeHidden();
+  });
+}
+
 test('two tabs serialize save writes and a stale tab preserves the winning save', async ({ page: winner, context }) => {
   const stale = await context.newPage();
   for (const page of [winner, stale]) {
@@ -387,19 +491,10 @@ test('two tabs serialize save writes and a stale tab preserves the winning save'
     await seeColor(page, originalColor);
   }
 
-  const hash = createHash('sha256').update(await readFile(fixture())).digest('hex');
-  const storageKey = 'nes-rust-neo/battery-v1/' + hash;
+  const storageKey = await batteryKey();
   // Hold the real origin-wide lock until both application writes are waiting.
-  await winner.evaluate(key => new Promise(resolve => {
-    void navigator.locks.request(key, () => new Promise(release => {
-      window.releaseSaveLock = release;
-      resolve();
-    }));
-  }), storageKey);
-  const queued = () => winner.evaluate(async key => {
-    const { pending } = await navigator.locks.query();
-    return pending.filter(lock => lock.name === key).length;
-  }, storageKey);
+  await holdSaveLock(winner, storageKey);
+  const queued = () => queuedSaveWrites(winner, storageKey);
   try {
     await winner.bringToFront();
     await winner.locator('canvas').focus();
@@ -442,11 +537,12 @@ test('unavailable cartridge storage and failed writes can recover after switchin
     const setItem = Storage.prototype.setItem;
     Storage.prototype.setItem = function (name, value) {
       if (window.failWrite && name.includes('/battery-v1/')) throw new DOMException('Test quota failure', 'QuotaExceededError');
+      if (window.failDraft && name.includes('/battery-draft-v1/')) throw new DOMException('Test quota failure', 'QuotaExceededError');
       return setItem.call(this, name, value);
     };
   });
   await coreReady(page);
-  await page.evaluate(() => { window.failLibrary = window.failWrite = true; });
+  await page.evaluate(() => { window.failLibrary = window.failWrite = window.failDraft = true; });
   await choose(page);
   await seeColor(page, originalColor);
   await expect(page.locator('#warnings')).toHaveText(/could not be remembered/);
@@ -454,9 +550,10 @@ test('unavailable cartridge storage and failed writes can recover after switchin
   await page.getByRole('button', { name: 'Pause', exact: true }).click();
   await expect(page.locator('#warnings')).toHaveText(/Progress is held in this tab/);
 
-  await page.evaluate(() => { window.failLibrary = false; });
+  await page.evaluate(() => { window.failLibrary = window.failDraft = false; });
   await choose(page, 'diagnostic-alternate');
   await seeColor(page, originalColor);
+  await expect(page.locator('#warnings')).toHaveText(/recover progress after reload/);
   await page.evaluate(() => { window.failWrite = false; });
   await page.getByRole('button', { name: 'Retry save storage' }).click();
   await expect(page.locator('#warnings')).toBeHidden();
