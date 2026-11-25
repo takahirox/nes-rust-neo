@@ -74,6 +74,13 @@ impl Default for FdsAudio {
 impl FdsAudio {
     const PHASE_MASK: u32 = (64 << 16) - 1;
 
+    pub fn reset_output(&mut self) {
+        self.volume.write(0x80);
+        self.wave_phase = 0;
+        self.bias = 0;
+        self.output = 0.0;
+    }
+
     fn signed_bias(value: i32) -> i32 {
         (value + 64).rem_euclid(128) - 64
     }
