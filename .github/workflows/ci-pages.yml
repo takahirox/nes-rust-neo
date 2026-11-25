@@ -31,6 +31,7 @@ jobs:
           cargo clippy --workspace --all-targets --locked -- -D warnings
           cargo test --workspace --locked
           node tests/roms/check.mjs
+          node tests/fds/check.mjs
       - name: Build browser app
         run: |
           cargo build --locked -p nes-wasm --target wasm32-unknown-unknown --release

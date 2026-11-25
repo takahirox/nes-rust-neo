@@ -9,24 +9,35 @@ export async function loadCore() {
 
   function stage(bytes) {
     const address = api.input_buffer(bytes.byteLength);
-    if (!address) throw new Error('ROM file is too large (maximum 8 MiB).');
+    if (!address) throw new Error('Input exceeds the emulator staging capacity.');
     new Uint8Array(api.memory.buffer, address, bytes.byteLength).set(bytes);
   }
 
+  function error() {
+    const bytes = new Uint8Array(api.memory.buffer, api.error_ptr(), api.error_len());
+    return new Error(new TextDecoder().decode(bytes));
+  }
+
   return {
-    prepare(bytes) {
+    inspect(bytes) {
       stage(bytes);
-      if (!api.prepare_rom()) {
-        const error = new Uint8Array(api.memory.buffer, api.error_ptr(), api.error_len());
-        throw new Error(new TextDecoder().decode(error));
-      }
-      return api.candidate_battery_len();
+      const kind = api.stage_media();
+      if (!kind) throw error();
+      return kind - 1;
+    },
+    prepare(bios = new Uint8Array()) {
+      stage(bios);
+      if (!api.prepare_machine()) throw error();
+      return api.candidate_save_len();
     },
     restore(bytes, candidate = false) {
       stage(bytes);
-      return Boolean(candidate ? api.restore_candidate_battery() : api.restore_live_battery());
+      return Boolean(candidate ? api.restore_candidate_save() : api.restore_live_save());
     },
-    activate: api.activate_rom,
+    activate: api.activate_machine,
+    discard: api.discard_candidate,
+    diskSide: api.disk_side,
+    selectDisk: api.select_disk,
     reset: api.reset,
     runFrame: api.run_frame,
     peekRam: api.debug_peek_ram,
@@ -38,9 +49,9 @@ export async function loadCore() {
     audio() {
       return new Float32Array(api.memory.buffer, api.audio_ptr(), api.audio_len());
     },
-    saveRevision: api.battery_revision,
+    saveRevision: api.save_revision,
     saveBytes() {
-      return new Uint8Array(api.memory.buffer, api.battery_ptr(), api.battery_len()).slice();
+      return new Uint8Array(api.memory.buffer, api.save_ptr(), api.save_len()).slice();
     },
   };
 }

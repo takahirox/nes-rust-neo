@@ -12,21 +12,21 @@ const thirdPressColor = [117, 39, 254];
 
 async function coreReady(page) {
   await page.goto('./');
-  await expect(page.getByRole('button', { name: 'Insert cartridge', exact: true })).toBeEnabled();
+  await expect(page.getByRole('button', { name: 'Open game', exact: true })).toBeEnabled();
 }
 
 async function openCartridges(page) {
-  await page.getByRole('button', { name: /^(Insert|Change) cartridge$/ }).click();
-  await expect(page.getByRole('dialog', { name: 'Cartridges' })).toBeVisible();
+  await page.getByRole('button', { name: /^(Open|Change) game$/ }).click();
+  await expect(page.getByRole('dialog', { name: 'Open game' })).toBeVisible();
 }
 
 async function choose(page, name) {
   await openCartridges(page);
   const chooser = page.waitForEvent('filechooser');
-  await page.getByRole('button', { name: 'Open local ROM' }).click();
+  await page.getByRole('button', { name: 'Open local game' }).click();
   await (await chooser).setFiles(fixture(name));
   await expect(page.getByRole('button', { name: 'Pause', exact: true })).toBeEnabled();
-  await expect(page.getByRole('dialog', { name: 'Cartridges' })).toBeHidden();
+  await expect(page.getByRole('dialog', { name: 'Open game' })).toBeHidden();
 }
 
 function color(page) {
@@ -129,7 +129,7 @@ test('production subpath, empty startup, picker, rejection, cancellation and swi
   }));
   await coreReady(page);
   const appUrl = page.url();
-  const assets = ['', 'style.css', 'main.js', 'controls.js', 'storage.js', 'audio.js', 'wasm.js', 'nes_wasm.wasm']
+  const assets = ['', 'style.css', 'main.js', 'controls.js', 'storage.js', 'disk-storage.js', 'audio.js', 'wasm.js', 'nes_wasm.wasm']
     .map(name => new URL(name, appUrl).href).sort();
   expect(requests.map(request => request.url).sort()).toEqual(assets);
   await expect(page.locator('#inserted')).toHaveText('None');
@@ -142,7 +142,7 @@ test('production subpath, empty startup, picker, rejection, cancellation and swi
   await openCartridges(page);
   await expect(page.locator('#library li')).toHaveCount(0);
   await page.keyboard.press('Escape');
-  await expect(page.getByRole('dialog', { name: 'Cartridges' })).toBeHidden();
+  await expect(page.getByRole('dialog', { name: 'Open game' })).toBeHidden();
 
   await choose(page);
   await seeColor(page, originalColor);
@@ -150,7 +150,7 @@ test('production subpath, empty startup, picker, rejection, cancellation and swi
   const picker = page.locator('#rom');
   const invalid = { name: 'broken.nes', mimeType: 'application/octet-stream', buffer: Buffer.from([0, 1, 2]) };
   await picker.setInputFiles(invalid);
-  await expect(page.locator('#status')).toHaveText(/iNES header/);
+  await expect(page.locator('#status')).toHaveText(/Unsupported game format/);
   await expect(page.locator('#inserted')).toHaveText('diagnostic.nes');
   await seeColor(page, pressColor);
 

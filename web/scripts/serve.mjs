@@ -13,7 +13,7 @@ const contentTypes = {
 createServer(async (request, response) => {
   const path = new URL(request.url, `http://${host}`).pathname;
   const file = path === prefix ? 'index.html' : path.slice(prefix.length);
-  if (!path.startsWith(prefix) || !/^[a-z_]+\.(html|css|js|wasm)$/.test(file)) {
+  if (!path.startsWith(prefix) || !/^[a-z_-]+\.(html|css|js|wasm)$/.test(file)) {
     response.writeHead(404).end();
     return;
   }

@@ -1,8 +1,9 @@
 import { loadCore } from './wasm.js';
+import { biosSize, DiskSave, forgetBios, readBios, writeBios } from './disk-storage.js';
 import { Sound } from './audio.js';
 import { controls } from './controls.js';
 import {
-  BatterySaves, identify, listCartridges, preferencesKey, remember, remembered, removeCartridge,
+  BatterySaves, identify, listGames, preferencesKey, remember, remembered, removeGame,
 } from './storage.js';
 
 const get = id => document.getElementById(id);
@@ -12,19 +13,27 @@ const canvas = screen.querySelector('canvas');
 const context = canvas.getContext('2d', { alpha: false });
 const image = context.createImageData(256, 240);
 const picker = get('rom');
-const cartridgePicker = get('cartridge-picker');
-const cartridgeButton = get('change-cartridge');
+const gamePicker = get('cartridge-picker');
+const gameButton = get('change-cartridge');
 const library = get('library');
 const play = get('play');
+const diskSide = get('disk-side');
+const diskToggle = get('disk-toggle');
+const biosInput = get('bios');
+const biosButton = get('open-bios');
 const help = get('help');
 const prefs = { scale: '3', display: 'crt', volume: 100, muted: false };
 const sound = new Sound();
 const saves = new BatterySaves();
 const warnings = new Map();
+const diskSideBytes = 65_500;
+const maxGameBytes = 16 + 255 * diskSideBytes;
 const frameMs = 1000 / 60.0988;
 let core;
 let active;
-let pendingCartridge;
+let pendingGame;
+let biosRequest;
+let biosRemembered = false;
 let running = false;
 let busy = false;
 let previous;
@@ -38,12 +47,14 @@ function notice(message) {
 function warn(category, message) {
   if (message) warnings.set(category, message);
   else warnings.delete(category);
-  const saveWarning = saves.warning;
+  const diskWarning = active?.diskSave?.failed
+    ? `Could not save disk changes for ${active.name}. Keep this tab open and retry save storage.` : '';
+  const saveWarning = [saves.warning, diskWarning].filter(Boolean).join(' ');
   const parts = [...warnings.values(), saveWarning].filter(Boolean);
   const text = parts.join(' ');
   if (get('warnings').textContent !== text) get('warnings').textContent = text;
   get('warnings').hidden = parts.length === 0;
-  get('retry-save').hidden = Boolean(pendingCartridge?.conflict) || (!pendingCartridge && !saveWarning);
+  get('retry-save').hidden = Boolean(pendingGame?.conflict) || (!pendingGame && !saveWarning);
 }
 
 function soundError(error) {
@@ -68,15 +79,26 @@ function syncUI() {
   play.textContent = running ? 'Pause' : 'Play';
   play.disabled = !active || busy;
   get('reset').disabled = !active || busy;
-  cartridgeButton.disabled = !core;
+  gameButton.disabled = !core || busy;
   get('open-file').disabled = !core || busy;
   get('retry-save').disabled = busy;
   get('save-choices').disabled = busy;
+  diskSide.disabled = diskToggle.disabled = busy;
+  biosButton.disabled = get('forget-bios').disabled = get('cancel-bios').disabled = busy;
   for (const button of library.querySelectorAll('button')) button.disabled = busy;
   pads.setEnabled(enabled());
 }
 
+async function flushDisk(force = false) {
+  const disk = active?.diskSave;
+  if (disk?.dirty(core) && (force || (!disk.failed && !disk.writing))) {
+    await disk.flush(core);
+    warn('save', '');
+  }
+}
+
 async function flushSave() {
+  if (active?.diskSave) await flushDisk(true);
   saves.capture(active?.save, core);
   const writing = saves.flush(active?.save);
   warn('save', '');
@@ -135,10 +157,10 @@ function storePreferences() {
 
 async function refreshLibrary() {
   try {
-    const cartridges = await listCartridges();
+    const games = await listGames();
     const nameCounts = new Map();
-    for (const { name } of cartridges) nameCounts.set(name, (nameCounts.get(name) ?? 0) + 1);
-    const rows = cartridges.map(({ id, name }, index) => {
+    for (const { name } of games) nameCounts.set(name, (nameCounts.get(name) ?? 0) + 1);
+    const rows = games.map(({ id, name }, index) => {
       const row = document.createElement('li');
       const open = document.createElement('button');
       open.textContent = name;
@@ -147,8 +169,7 @@ async function refreshLibrary() {
         unlockAudio();
         operate(async () => {
           const record = await remembered(id);
-          if (!record) throw new Error('This ROM is missing from local storage.');
-          if (await identify(record.bytes) !== id) throw new Error('The remembered ROM no longer matches its identity.');
+          if (!record || record.id !== id) throw new Error('This game is missing from local storage.');
           await insert(record);
         });
       };
@@ -158,7 +179,7 @@ async function refreshLibrary() {
       remove.className = 'remove-cartridge';
       remove.setAttribute('aria-label', `Remove ${name}`);
       remove.onclick = () => operate(async () => {
-        await removeCartridge(id);
+        await removeGame(id);
         await refreshLibrary();
         get('library-status').textContent = `Removed ${name} from this browser’s list.`;
       });
@@ -179,7 +200,7 @@ async function refreshLibrary() {
     warn('library', '');
     syncUI();
   } catch {
-    warn('library', 'The remembered cartridge list is unavailable.');
+    warn('library', 'The remembered game list is unavailable.');
   }
 }
 
@@ -199,14 +220,16 @@ async function operate(operation) {
   try {
     await operation();
   } catch (error) {
-    if (cartridgePicker.matches(':popover-open')) get('library-status').textContent = error.message;
+    if (gamePicker.matches(':popover-open')) get('library-status').textContent = error.message;
     else notice(error.message);
   } finally {
     busy = false;
     syncUI();
-    if (cartridgePicker.matches(':popover-open')) {
-      if (!cartridgePicker.contains(document.activeElement)) get('open-file').focus({ preventScroll: true });
-    } else if (pendingCartridge?.conflict) {
+    if (gamePicker.matches(':popover-open')) {
+      if (biosRequest || !gamePicker.contains(document.activeElement)) {
+        (biosRequest ? biosButton : get('open-file')).focus({ preventScroll: true });
+      }
+    } else if (pendingGame?.conflict) {
       get('save-versions').querySelector('button').focus({ preventScroll: true });
     } else if (active && running && !document.hidden && !help.open) {
       canvas.focus({ preventScroll: true });
@@ -236,40 +259,130 @@ function showSaveChoices(record, rememberImport, conflict) {
   addChoice(conflict.base === null ? 'Start without a save' : 'Use the stored save', conflict.base);
 }
 
-async function insert(record, rememberImport = false, selection) {
-  const { bytes, id, name } = record;
-  const size = core.prepare(new Uint8Array(bytes));
+function showDiskState() {
+  if (!active?.diskSave) return;
+  const requested = active.requestedSide;
+  const inserted = core.diskSide();
+  const action = requested === null ? 'Insert' : 'Eject';
+  const status = requested === null ? 'Drive empty' : inserted === requested ? 'Inserted' : 'Changing side…';
+  if (diskToggle.textContent !== action) diskToggle.textContent = action;
+  if (get('disk-status').textContent !== status) get('disk-status').textContent = status;
+}
+
+function selectDisk(side) {
+  if (busy || !active?.diskSave || !core.selectDisk(side ?? -1)) return;
+  active.requestedSide = side;
+  showDiskState();
+  flushDisk(true);
+}
+
+diskSide.onchange = () => {
+  if (active?.diskSave && active.requestedSide !== null) selectDisk(Number(diskSide.value));
+};
+diskToggle.onclick = () => selectDisk(active.requestedSide === null ? Number(diskSide.value) : null);
+
+function syncBios() {
+  get('bios-required').hidden = get('cancel-bios').hidden = !biosRequest;
+  get('forget-bios').hidden = !biosRemembered || Boolean(biosRequest);
+  biosButton.textContent = biosRequest || !biosRemembered ? 'Choose FDS BIOS…' : 'Replace FDS BIOS…';
+}
+
+function clearBiosRequest() {
+  if (biosRequest) core.discard();
+  biosRequest = undefined;
+  syncBios();
+}
+
+async function insert(record, rememberImport = false, selection, suppliedBios) {
+  clearBiosRequest();
+  const { name } = record;
+  const bytes = new Uint8Array(record.bytes);
+  const sides = core.inspect(bytes);
+  const diskBytes = sides ? bytes.subarray(bytes.length - sides * diskSideBytes) : bytes;
+  const hash = await identify(diskBytes);
+  const id = sides ? `fds-${hash}` : hash;
+  if (!rememberImport && record.id !== id) {
+    core.discard();
+    throw new Error('The remembered game no longer matches its identity.');
+  }
+  if (rememberImport) record = { ...record, id };
+  let bios;
+  if (sides) {
+    let reason = '';
+    try {
+      bios = suppliedBios ?? await readBios();
+      if (bios && (!(bios instanceof Uint8Array) || bios.byteLength !== biosSize)) {
+        reason = 'The remembered FDS BIOS is invalid. Choose another file.';
+        bios = undefined;
+      }
+    } catch {
+      reason = 'Could not read the remembered FDS BIOS. Choose a local file.';
+    }
+    if (!bios) {
+      biosRequest = { record, rememberImport };
+      syncBios();
+      if (!gamePicker.matches(':popover-open')) gamePicker.showPopover();
+      biosButton.focus({ preventScroll: true });
+      get('library-status').textContent = reason;
+      return;
+    }
+  }
+  const size = core.prepare(bios);
   await flushSave();
+  const previousDisk = active?.diskSave;
+  if (previousDisk && !await previousDisk.finish(core)) {
+    core.discard();
+    warn('save', '');
+    throw new Error('Save the current disk changes before opening another game.');
+  }
   let save;
+  let diskSave;
   try {
-    save = await saves.open(id, name, size, core, selection);
-  } catch {
-    pendingCartridge = { record, rememberImport };
+    if (sides) {
+      diskSave = previousDisk?.id === id ? previousDisk : await DiskSave.open(id, size, core);
+      if (diskSave === previousDisk && !core.restore(core.saveBytes(), true)) {
+        throw new Error('The core rejected the current disk data.');
+      }
+    } else {
+      save = await saves.open(id, name, size, core, selection);
+    }
+  } catch (error) {
+    core.discard();
+    pendingGame = { record, rememberImport };
     showSaveChoices();
-    cartridgePicker.hidePopover();
-    warn('restore', `Could not restore the battery save for ${name}. Existing data is protected.`);
+    gamePicker.hidePopover();
+    const detail = sides ? ` ${error.message}` : '';
+    const kind = sides ? 'disk progress' : 'battery save';
+    warn('restore', `Could not restore the ${kind} for ${name}. Existing data is protected.${detail}`);
     return;
   }
   if (save?.conflict) {
-    pendingCartridge = { record, rememberImport, conflict: save.conflict };
-    cartridgePicker.hidePopover();
+    core.discard();
+    pendingGame = { record, rememberImport, conflict: save.conflict };
+    gamePicker.hidePopover();
     showSaveChoices(record, rememberImport, save.conflict);
     const reason = selection ? `The available save versions for ${name} changed.` : `Multiple recovery copies exist for ${name}.`;
     warn('restore', `${reason} Choose the version to keep. This removes the other copies.`);
     return;
   }
+  if (previousDisk && previousDisk !== diskSave) await previousDisk.close();
   core.activate();
+  if (diskSave) diskSave.revision = core.saveRevision();
   if (save) save.revision = core.saveRevision();
-  pendingCartridge = undefined;
+  pendingGame = undefined;
   showSaveChoices();
-  active = { name, save };
+  active = { name, save, diskSave, requestedSide: sides ? 0 : null };
+  get('disk-controls').hidden = !sides;
+  diskSide.replaceChildren(...Array.from({ length: sides }, (_, side) =>
+    new Option(`Disk ${Math.floor(side / 2) + 1} — ${side % 2 ? 'B' : 'A'}`, String(side))));
+  showDiskState();
   running = true;
   budget = frameMs;
   get('empty').hidden = true;
   get('inserted').textContent = name;
   get('inserted').title = name;
-  cartridgeButton.textContent = 'Change cartridge';
-  cartridgePicker.hidePopover();
+  gameButton.textContent = 'Change game';
+  gamePicker.hidePopover();
   notice('');
   warn('restore', '');
   if (rememberImport) {
@@ -277,23 +390,29 @@ async function insert(record, rememberImport = false, selection) {
       await remember(record);
       await refreshLibrary();
     } catch {
-      warn('library', 'This cartridge could not be remembered. It can still be played.');
+      warn('library', 'This game could not be remembered. It can still be played.');
     }
   }
 }
 
 function openPicker() {
   unlockAudio();
-  cartridgePicker.hidePopover();
+  gamePicker.hidePopover();
   picker.value = '';
   picker.click();
 }
 
 get('open-file').onclick = openPicker;
-cartridgePicker.addEventListener('beforetoggle', event => {
+gamePicker.addEventListener('beforetoggle', event => {
   if (event.newState === 'open') {
     pads.clear();
     get('library-status').textContent = warnings.get('library') || '';
+    readBios().then(bios => {
+      biosRemembered = bios != null;
+      syncBios();
+    }).catch(() => {});
+  } else {
+    clearBiosRequest();
   }
 });
 picker.addEventListener('cancel', () => {
@@ -305,10 +424,51 @@ picker.addEventListener('change', () => {
   picker.value = '';
   if (!file) return;
   operate(async () => {
-    if (file.size > 8 * 1024 * 1024) throw new Error('ROM file is too large (maximum 8 MiB).');
+    if (file.size > maxGameBytes) throw new Error('Game file exceeds the maximum supported image size.');
     const bytes = await file.arrayBuffer();
-    const id = await identify(bytes);
-    await insert({ id, name: file.name, bytes }, true);
+    await insert({ name: file.name, bytes }, true);
+  });
+});
+
+biosButton.onclick = () => {
+  unlockAudio();
+  biosInput.value = '';
+  biosInput.click();
+};
+get('cancel-bios').onclick = () => {
+  clearBiosRequest();
+  gamePicker.hidePopover();
+  notice('Disk load cancelled.');
+  if (active) canvas.focus({ preventScroll: true });
+};
+get('forget-bios').onclick = () => operate(async () => {
+  await forgetBios();
+  biosRemembered = false;
+  syncBios();
+  get('library-status').textContent = 'The remembered FDS BIOS was removed.';
+});
+biosInput.addEventListener('cancel', () => {
+  get('library-status').textContent = 'BIOS selection cancelled.';
+  biosButton.focus({ preventScroll: true });
+});
+biosInput.addEventListener('change', () => {
+  const [file] = biosInput.files;
+  biosInput.value = '';
+  if (!file) return;
+  operate(async () => {
+    if (file.size !== biosSize) throw new Error('The FDS BIOS must be exactly 8192 bytes (8 KiB).');
+    const bytes = new Uint8Array(await file.arrayBuffer());
+    const request = biosRequest;
+    try {
+      await writeBios(bytes);
+      biosRemembered = true;
+      syncBios();
+      warn('bios', '');
+    } catch {
+      warn('bios', 'Could not remember the FDS BIOS in this browser.');
+    }
+    if (request && request === biosRequest) await insert(request.record, request.rememberImport, undefined, bytes);
+    else if (biosRemembered) get('library-status').textContent = 'The FDS BIOS was saved locally.';
   });
 });
 
@@ -330,7 +490,7 @@ function restart() {
   if (core.runFrame(0, 0)) core.draw(context, image);
   else {
     running = false;
-    notice('The cartridge stopped on a CPU jam.');
+    notice('The game stopped on a CPU jam.');
   }
   if (running) canvas.focus({ preventScroll: true });
   syncUI();
@@ -341,17 +501,18 @@ get('reset').onclick = () => {
   restart();
 };
 get('retry-save').onclick = () => {
-  if (pendingCartridge) unlockAudio();
+  if (pendingGame) unlockAudio();
   operate(async () => {
-    if (pendingCartridge) {
-      const { record, rememberImport } = pendingCartridge;
+    if (pendingGame) {
+      const { record, rememberImport } = pendingGame;
       await insert(record, rememberImport);
       return;
     }
     await flushSave();
+    await active?.diskSave?.finish(core);
     if (await saves.retry(active?.save, core)) {
       restart();
-      if (running) notice('Battery save restored. Cartridge restarted.');
+      if (running) notice('Battery save restored. Game restarted.');
     }
     warn('save', '');
   });
@@ -419,6 +580,13 @@ document.addEventListener('visibilitychange', () => {
   else if (running) sound.resume().catch(soundError);
   syncUI();
 });
+window.addEventListener('beforeunload', event => {
+  const disk = active?.diskSave;
+  if (disk?.dirty(core)) {
+    event.preventDefault();
+    event.returnValue = true;
+  }
+});
 window.addEventListener('pagehide', () => {
   clearTransient();
   flushSave();
@@ -436,7 +604,7 @@ function animate(now) {
         running = false;
         clearTransient();
         flushSave();
-        notice('The cartridge stopped on a CPU jam.');
+        notice('The game stopped on a CPU jam.');
         syncUI();
         break;
       }
@@ -444,6 +612,8 @@ function animate(now) {
       drew = true;
     }
     if (drew) core.draw(context, image);
+    showDiskState();
+    flushDisk();
     if (now - lastSave >= 500) {
       flushSave();
       lastSave = now;

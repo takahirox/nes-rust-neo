@@ -1,5 +1,5 @@
 use crate::apu::Apu;
-use crate::cartridge::Cartridge;
+use crate::board::Board;
 use crate::cpu::CpuBus;
 use crate::ppu::Ppu;
 
@@ -22,7 +22,7 @@ impl Pad {
 
 pub(crate) struct Bus {
     pub ram: [u8; 2048],
-    pub cart: Cartridge,
+    pub board: Board,
     pub ppu: Ppu,
     pub apu: Apu,
     pub pads: [Pad; 2],
@@ -33,10 +33,10 @@ pub(crate) struct Bus {
 }
 
 impl Bus {
-    pub fn new(cart: Cartridge) -> Self {
+    pub fn new(board: Board) -> Self {
         Self {
             ram: [0; 2048],
-            cart,
+            board,
             ppu: Ppu::new(),
             apu: Apu::new(),
             pads: [Pad::default(), Pad::default()],
@@ -48,7 +48,7 @@ impl Bus {
     }
 
     pub fn reset(&mut self) {
-        self.cart.reset();
+        self.board.reset();
         self.ram.fill(0);
         self.ppu = Ppu::new();
         self.apu = Apu::new();
@@ -61,21 +61,22 @@ impl Bus {
 
     fn tick(&mut self) {
         self.cycle += 1;
-        self.apu.tick(self.cycle);
+        let expansion = self.board.tick();
+        self.apu.tick(self.cycle, expansion);
         for _ in 0..3 {
-            self.ppu.tick(&mut self.cart);
+            self.ppu.tick(&mut self.board);
         }
     }
 
     fn raw_read(&mut self, addr: u16) -> u8 {
         let value = match addr {
             0..=0x1fff => self.ram[usize::from(addr & 0x7ff)],
-            0x2000..=0x3fff => self.ppu.cpu_read(&mut self.cart, addr & 7),
+            0x2000..=0x3fff => self.ppu.cpu_read(&mut self.board, addr & 7),
             0x4015 => self.apu.status(self.open),
             0x4016..=0x4017 => {
                 (self.open & 0xe0) | self.pads[usize::from(addr & 1)].read(self.strobe)
             }
-            0x4020..=0xffff => self.cart.cpu_read(addr, self.open),
+            0x4020..=0xffff => self.board.cpu_read(addr, self.open),
             _ => self.open,
         };
         if addr != 0x4015 {
@@ -128,7 +129,7 @@ impl CpuBus for Bus {
         self.open = value;
         match addr {
             0..=0x1fff => self.ram[usize::from(addr & 0x7ff)] = value,
-            0x2000..=0x3fff => self.ppu.cpu_write(&mut self.cart, addr & 7, value),
+            0x2000..=0x3fff => self.ppu.cpu_write(&mut self.board, addr & 7, value),
             0x4014 => self.dma = Some(value),
             0x4016 => {
                 let next = value & 1 != 0;
@@ -140,7 +141,7 @@ impl CpuBus for Bus {
                 self.strobe = next;
             }
             0x4000..=0x4013 | 0x4015 | 0x4017 => self.apu.write(addr, value, self.cycle),
-            0x4020..=0xffff => self.cart.cpu_write(addr, value, self.cycle),
+            0x4020..=0xffff => self.board.cpu_write(addr, value, self.cycle),
             _ => {}
         }
         self.tick();
@@ -150,6 +151,6 @@ impl CpuBus for Bus {
         self.ppu.take_nmi()
     }
     fn irq(&self) -> bool {
-        self.apu.irq() || self.cart.irq()
+        self.apu.irq() || self.board.irq()
     }
 }

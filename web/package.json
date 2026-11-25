@@ -6,7 +6,7 @@
   "scripts": {
     "build": "node scripts/build.mjs",
     "serve": "node scripts/serve.mjs",
-    "test": "node ../tests/roms/build.mjs && playwright test"
+    "test": "node ../tests/roms/build.mjs && node ../tests/fds/build.mjs && playwright test"
   },
   "devDependencies": {
     "@playwright/test": "1.62.0"

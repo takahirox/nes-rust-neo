@@ -1,6 +1,6 @@
 # nes-rust-neo
 
-An NTSC NES emulator written from scratch in Rust. The browser app starts empty. Open a local iNES cartridge to play with 256×240 video and audio. The frontend builds to static files for GitHub Pages and can also run on localhost.
+An NTSC NES emulator written from scratch in Rust. The browser app starts empty. Open a local iNES cartridge or Famicom Disk System (FDS) image to play with 256×240 video and audio. The frontend builds to static files for GitHub Pages and can also run on localhost.
 
 ## Run locally
 
@@ -18,7 +18,7 @@ Open the URL printed by the server. It serves the build at [http://127.0.0.1:417
 
 ## Play
 
-Choose **Insert cartridge**, then **Open local ROM…**, and select a legally obtained local `.nes` file. A successful load starts playback. Use **Play** or **Pause** to control execution and **Reset** to restart the current cartridge with its battery RAM intact. The initial display is **CRT** at up to **3×** scale, with volume at 100%. **Help** opens the keyboard reference.
+Choose **Open game**, then **Open local game…**, and select a locally obtained `.nes` cartridge or `.fds` disk image. The emulator validates the file contents, selects the hardware, and starts playback. Use **Play** or **Pause** to control execution and **Reset** to restart with saved cartridge RAM or disk changes intact. The initial display is **CRT** at up to **3×** scale, with volume at 100%. **Help** opens the keyboard reference.
 
 | NES control | Keyboard | Standard gamepad |
 | --- | --- | --- |
@@ -30,19 +30,26 @@ Choose **Insert cartridge**, then **Open local ROM…**, and select a legally ob
 
 The on-screen controller supports simultaneous touch buttons and sliding diagonals. It sits beside the video on short landscape screens and stays available in fullscreen on touch devices. Keyboard and touch control player 1. A second standard gamepad controls player 2. Pause, window focus loss and hidden tabs release held input. Hidden tabs suspend emulation and audio. Use a button or key gesture to activate audio if the browser requires it.
 
-Successfully imported cartridges appear under **My cartridges** in the **Insert cartridge** or **Change cartridge** picker. Select a remembered entry to insert it again. **Remove** forgets the library entry and retains its battery save. The browser keys saves by SHA-256 over the original ROM bytes and uses Web Locks to coordinate writes across tabs. Reopen the cartridge after closing or reloading a tab to recover queued progress. If another tab saved different progress, **Retry save storage** loads the shared save. When browser storage fails, the warning indicates whether progress can survive a reload or is held in memory in the open tab. If a cartridge’s save cannot be read, the current cartridge keeps its play or pause state, and retry completes the insertion once the save is readable.
+Successfully imported games appear together under **My games** in the **Open game** or **Change game** picker. Select any remembered entry to open it. **Remove** forgets the entry and retains its progress. Existing imported cartridges and battery saves use their original storage and SHA-256 keys.
 
-ROMs, names, saves and preferences are stored in the browser. Clearing site data removes the library, saves and preferences. The app requests only its own static assets. The build contains no cartridges or game downloads.
+The first disk load asks for a lawfully obtained raw 8 KiB FDS BIOS, often named `disksys.rom`. BIOS validation checks the exact size of 8,192 bytes. The emulator accepts any raw firmware of that size and has no checksum allowlist. The verified firmware is the original diagnostic BIOS described in [FDS verification](docs/fds-verification.md). The picker can replace or forget the locally stored BIOS. Cancelling a game or BIOS selection, or encountering a validation or save-restore error, preserves the current game and its play or pause state.
+
+Disk games start with the first side inserted. Select **Disk side** to change sides in image order, or **Eject** to leave the drive empty. While the drive is empty, select a side and press **Insert**. The game keeps running through the short ejection and insertion delay. The controls are also available in fullscreen. Side timing advances with emulation, so a change requested while paused finishes after resuming.
+
+Disk saves use SHA-256 over the original side bytes in order, with the optional 16-byte FDS header excluded. Headered and headerless copies of the same sides share one library identity and save. Browser storage keeps cartridge battery RAM and disk writes independently. Only one tab can run a given disk image at a time. If a disk read or restore fails, retry after the error is resolved. If a disk write fails, keep the current tab open and use **Retry save storage**. Switching games waits for the disk changes to be committed. For battery save conflicts the retry and recovery controls show the available versions. Clearing site data removes the library, BIOS, saves and preferences.
+
+The app requests only its own static assets. Games, names, BIOS and saves stay on the local device. The build contains no ROMs, disk images or BIOS.
 
 ## Test
 
-Install [cc65](https://cc65.github.io/) for the test-only cartridge sources. On Ubuntu use `sudo apt-get install cc65`. On macOS use `brew install cc65`. The production build needs neither cc65 nor Playwright’s browser runtime.
+Install [cc65](https://cc65.github.io/) for the test-only cartridge and disk fixtures. On Ubuntu use `sudo apt-get install cc65`. On macOS use `brew install cc65`. The production build needs neither cc65 nor Playwright’s browser runtime.
 
 ```sh
 cargo fmt --all -- --check
 cargo clippy --workspace --all-targets --locked -- -D warnings
 cargo test --workspace --locked
 node tests/roms/check.mjs
+node tests/fds/check.mjs
 cargo build --locked -p nes-wasm --target wasm32-unknown-unknown --release
 npm --prefix web ci
 npm --prefix web run build
@@ -62,11 +69,13 @@ cargo run --locked --release -p nes-runner -- tests/generated/orbit.nes \
   --expect 102:11:02 --video tests/generated/orbit.ppm
 ```
 
-See fixture provenance, replay checkpoints, commands and acceptance evidence in [Test fixtures and verification](docs/verification.md).
+For an FDS run, pass `--bios FILE` and schedule any eject or insertion with `--disk FRAME:eject` or `--disk FRAME:SIDE`, where sides are one-based. `--disk-save-in FILE` restores a runner snapshot and `--disk-save-out NEW_FILE` writes one. FDS output files use new paths. The runner verifies the snapshot version and original side identity before loading it.
+
+See fixture provenance, replay checkpoints and results in [Cartridge verification](docs/verification.md) and [FDS verification](docs/fds-verification.md).
 
 ## Compatibility
 
-The core supports standard NTSC iNES cartridges. It emulates Ricoh 2A03 CPU instructions, two controllers, OAM DMA, the PPU background and sprite pipelines, and two pulse channels, triangle, noise and DMC. The headless and browser frontends use the same core.
+The core supports standard NTSC iNES cartridges and Famicom Disk System images. It emulates Ricoh 2A03 CPU instructions, two controllers, OAM DMA, the PPU background and sprite pipelines, and two pulse channels, triangle, noise and DMC. The headless and browser frontends use the same core.
 
 | Mapper | Implemented layout | Evidence |
 | --- | --- | --- |
@@ -76,18 +85,20 @@ The core supports standard NTSC iNES cartridges. It emulates Ricoh 2A03 CPU inst
 | 3 | CNROM with up to 32 KiB CHR ROM and discrete bus conflicts | Breakwater and native bank tests |
 | 4 | MMC3 with standard PRG/CHR banks, PRG RAM protection and scanline IRQ | Native bank tests and IRQ diagnostic ROM |
 
-This is a playable baseline. The test suite covers the supported layouts above. Other MMC1/MMC3 board variants, NES 2.0, PAL/Dendy timing, disk images, expansion audio, special controllers, save states and commercial-game compatibility are outside the verified baseline.
+An FDS image can have a standard 16-byte `FDS\x1a` header with a side count and zero reserved bytes, or begin with a valid disk-information block. Each side is exactly 65,500 bytes. File blocks and zero padding are validated on every side, including hidden file pairs beyond the advertised count. QD, raw bitstreams, write-protect variants and automatic side swapping are unsupported.
+
+The FDS baseline covers the RAM adapter, disk and timer IRQs, synthesized gaps and CRCs, manual side changes, disk writes and FDS expansion audio. Mandatory testing uses an original BIOS and a playable original disk guest. Nintendo BIOS revisions and commercial disk titles remain unverified. See the [FDS verification and hardware limitations](docs/fds-verification.md). Other MMC1/MMC3 board variants, NES 2.0, PAL/Dendy timing, special controllers and save states are outside the verified baseline.
 
 The PPU approximates OAM evaluation and sprite overflow, register open-bus decay, color emphasis and some mid-scanline interactions. CPU interrupt sampling and DMC/OAM contention cover the tested cases. Sub-cycle races around VBlank, controller read glitches from DMC DMA, analog APU output and unstable unofficial opcodes can differ on hardware. UxROM assumes a bus-conflict-free board. [NESdev hardware reference](https://www.nesdev.org/wiki/Nesdev_Wiki)
 
 ## Project layout and deployment
 
 - `crates/nes-core` owns the emulated machine and memory.
-- `crates/nes-wasm` exposes cartridge staging and bounded frame execution, with buffers for the browser.
+- `crates/nes-wasm` exposes transactional game staging, disk operations, saves and bounded frame execution, with buffers for the browser.
 - `crates/nes-runner` provides deterministic native replay and diagnostics.
 - `web` contains the static frontend, production build and Chromium tests.
 
-The GitHub Actions workflow tests and audits the same `web/dist` directory it uploads to GitHub Pages on pushes to `main`. Configure GitHub Pages to use GitHub Actions for the repository. See the [workflow](.github/workflows/ci-pages.yml) and the issue’s [publication checks](https://github.com/takahirox/nes-rust-neo/issues/3).
+The GitHub Actions workflow tests and audits the same `web/dist` directory it uploads to GitHub Pages on pushes to `main`. Configure GitHub Pages to use GitHub Actions for the repository. See the [workflow](.github/workflows/ci-pages.yml) and the [FDS publication checks](docs/fds-verification.md#publication).
 
 The workspace split and browser controls follow the SNES project’s development and UI reference, adapted to NES hardware. [snes-rust README](https://github.com/takahirox/snes-rust/blob/main/README.md) · [snes-rust browser app](https://takahirox.github.io/snes-rust/) · [snes-rust baseline issue](https://github.com/takahirox/snes-rust/issues/3)
 

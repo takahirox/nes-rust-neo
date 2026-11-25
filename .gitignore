@@ -6,3 +6,8 @@
 /tests/generated/
 *.nes
 *.sav
+*.fds
+*.qd
+*.rom
+*.bios
+*.fds-save
