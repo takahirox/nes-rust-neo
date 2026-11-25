@@ -2,95 +2,103 @@
 <html lang="en">
   <head>
     <meta charset="utf-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
     <meta name="description" content="Play locally selected NES cartridges in your browser.">
     <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self'; connect-src 'self'; img-src 'self' data:; object-src 'none'; base-uri 'none'; form-action 'none'">
     <link rel="icon" href="data:,">
-    <title>nes-rust-neo</title>
+    <title>nes-rust-neo · NES emulator</title>
     <link rel="stylesheet" href="./style.css">
     <script type="module" src="./main.js"></script>
   </head>
   <body>
-    <header class="header">
-      <h1>nes<span>-rust</span>-neo</h1>
-      <button id="help" type="button">Controls</button>
-    </header>
     <main>
-      <section class="console" aria-label="NES emulator">
-        <div class="screen" id="screen" data-scale="fit" data-display="pixel">
-          <div class="picture">
-            <canvas tabindex="0" width="256" height="240" aria-label="NES video output"></canvas>
-            <div class="overlay" id="empty">
-              <p>Insert a cartridge</p>
-              <small>Choose a local .nes file to start playing.</small>
-              <button class="primary" type="button" id="open-screen" disabled>Open ROM</button>
+      <header>
+        <h1>nes-rust-neo</h1>
+        <nav aria-label="Information">
+          <details id="help">
+            <summary>Help</summary>
+            <div class="controls-reference" role="group" aria-label="Controls reference" tabindex="0">
+              <h2>Keyboard</h2>
+              <dl>
+                <dt>Arrow keys</dt><dd>Move</dd>
+                <dt><kbd>Z</kbd> / <kbd>X</kbd></dt><dd>B / A</dd>
+                <dt><kbd>Enter</kbd> / <kbd>Shift</kbd></dt><dd>Start / Select</dd>
+              </dl>
+              <p>Slide across the touch D-pad for diagonals. Standard gamepads work.</p>
             </div>
+          </details>
+          <a href="https://github.com/takahirox/nes-rust-neo">GitHub</a>
+        </nav>
+      </header>
+      <section class="player" aria-label="NES player">
+        <div id="game-presentation" class="game-presentation">
+          <div class="screen" id="screen" data-scale="3" data-display="crt">
+            <div class="picture">
+              <canvas tabindex="0" width="256" height="240" aria-label="NES video output"></canvas>
+            </div>
+            <p id="empty">Insert a cartridge</p>
           </div>
           <button id="exit-fullscreen" type="button">Exit fullscreen</button>
-        </div>
-        <div class="transport">
-          <div class="transport-main" role="group" aria-label="Playback">
-            <button id="play" type="button" disabled>Play</button>
-            <button id="reset" type="button" disabled>Reset</button>
-            <button id="fullscreen" type="button">Fullscreen</button>
+          <div class="touch" role="group" aria-label="On-screen NES controller">
+            <div class="left-controls">
+              <div id="dpad" class="dpad" role="group" aria-label="Directional pad">
+                <button type="button" data-pad="16" aria-label="Up">▲</button>
+                <button type="button" data-pad="64" aria-label="Left">◀</button>
+                <button type="button" data-pad="128" aria-label="Right">▶</button>
+                <button type="button" data-pad="32" aria-label="Down">▼</button>
+              </div>
+              <button class="system" type="button" data-pad="4">Select</button>
+            </div>
+            <div class="right-controls">
+              <div class="action-buttons">
+                <button type="button" data-pad="2">B</button>
+                <button type="button" data-pad="1">A</button>
+              </div>
+              <button class="system" type="button" data-pad="8">Start</button>
+            </div>
           </div>
+        </div>
+        <div class="toolbar" role="group" aria-label="Player controls">
+          <button id="play" type="button" disabled>Play</button>
+          <button id="reset" type="button" disabled>Reset</button>
           <div class="sound" role="group" aria-label="Audio">
             <button id="mute" type="button" aria-pressed="false">Mute</button>
-            <label for="volume">Volume</label>
-            <input type="range" id="volume" min="0" max="100" value="65">
+            <input type="range" id="volume" min="0" max="100" value="100" aria-label="Volume">
           </div>
+          <button id="fullscreen" type="button">Fullscreen</button>
+          <div class="options" role="group" aria-label="Display settings">
+            <label>Scale <select id="scale">
+              <option value="1">1×</option><option value="2">2×</option>
+              <option value="3" selected>3×</option><option value="fit">Fit</option>
+            </select></label>
+            <label>Display <select id="display">
+              <option value="crt">CRT</option><option value="pixel">Pixel</option>
+            </select></label>
+          </div>
+          <p id="status" role="status">Loading emulator…</p>
         </div>
-        <div class="options">
-          <label for="scale">Scale</label>
-          <select id="scale">
-            <option value="fit">Fit</option><option value="1">1×</option>
-            <option value="2">2×</option><option value="3">3×</option>
-          </select>
-          <label for="display">Display</label>
-          <select id="display"><option value="pixel">Pixel</option><option value="crt">CRT</option></select>
-        </div>
-      </section>
-      <section class="touch" aria-label="On-screen NES controller">
-        <div id="dpad" class="dpad" role="group" aria-label="Directional pad">
-          <button type="button" data-pad="16" aria-label="Up">▲</button>
-          <button type="button" data-pad="64" aria-label="Left">◀</button>
-          <button type="button" data-pad="128" aria-label="Right">▶</button>
-          <button type="button" data-pad="32" aria-label="Down">▼</button>
-        </div>
-        <div class="system-buttons">
-          <button type="button" data-pad="4">Select</button>
-          <button type="button" data-pad="8">Start</button>
-        </div>
-        <div class="action-buttons">
-          <button type="button" data-pad="2">B</button>
-          <button type="button" data-pad="1">A</button>
-        </div>
-      </section>
-      <section class="cartridges" aria-labelledby="cartridge-heading">
-        <div class="cartridge-heading">
-          <div>
+        <div class="game-entry" role="group" aria-label="Cartridge slot">
+          <div class="cartridge-value">
+            <span id="cartridge-label">Inserted cartridge</span>
+            <p id="inserted" title="None">None</p>
+          </div>
+          <button id="change-cartridge" type="button" popovertarget="cartridge-picker" aria-haspopup="dialog" disabled>Insert cartridge</button>
+          <div id="cartridge-picker" popover role="dialog" aria-labelledby="cartridge-heading">
             <h2 id="cartridge-heading">Cartridges</h2>
-            <p id="inserted">None inserted</p>
+            <p id="library-status" role="status"></p>
+            <section id="my-cartridges" aria-labelledby="my-cartridges-heading" hidden>
+              <h3 id="my-cartridges-heading">My cartridges</h3>
+              <ul id="library" role="list"></ul>
+            </section>
+            <button id="open-file" type="button" autofocus disabled>Open local ROM…</button>
           </div>
-          <button id="open-file" type="button" disabled>Open local ROM</button>
-          <input id="rom" type="file" accept=".nes" hidden>
+          <input id="rom" type="file" accept=".nes" aria-label="Open local ROM" hidden>
         </div>
-        <ul id="library" aria-label="Remembered cartridges" hidden></ul>
-        <p class="note">ROMs and battery saves stay in this browser.</p>
-        <p id="status" role="status">Loading emulator…</p>
+      </section>
+      <div class="notices">
         <p id="warnings" role="status" hidden></p>
         <button id="retry-save" type="button" hidden>Retry save storage</button>
-      </section>
+      </div>
     </main>
-    <dialog id="help-dialog" aria-labelledby="help-title">
-      <h2 id="help-title">Controller 1</h2>
-      <dl>
-        <dt>Arrow keys</dt><dd>Move</dd>
-        <dt>X / Z</dt><dd>A / B</dd>
-        <dt>Enter / Shift</dt><dd>Start / Select</dd>
-      </dl>
-      <p>Use a standard gamepad or the on-screen controls. Slide across the D-pad for diagonals.</p>
-      <form method="dialog"><button type="submit">Close</button></form>
-    </dialog>
   </body>
 </html>

@@ -29,7 +29,7 @@ export function controls(panel, enabled, gesture) {
   window.addEventListener('gamepaddisconnected', event => blockedPads.delete(event.gamepad.index));
   window.addEventListener('keydown', event => {
     if (!enabled() || event.ctrlKey || event.altKey || event.metaKey ||
-        event.target.closest?.('input, select, dialog') ||
+        event.target.closest?.('input, select, #help, #cartridge-picker') ||
         (event.code === 'Enter' && event.target.closest?.('button'))) return;
     if (keys.has(event.code)) {
       event.preventDefault();
@@ -54,6 +54,7 @@ export function controls(panel, enabled, gesture) {
     gesture();
   }
   function release(event) { pointers.delete(event.pointerId); }
+  panel.addEventListener('contextmenu', event => event.preventDefault());
   for (const type of ['pointerup', 'pointercancel', 'lostpointercapture']) panel.addEventListener(type, release);
   dpad.addEventListener('pointerdown', event => start(dpad, event, direction(event)));
   dpad.addEventListener('pointermove', event => {

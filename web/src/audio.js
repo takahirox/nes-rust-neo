@@ -3,7 +3,7 @@ export class Sound {
   #gain;
   #next = 0;
   #sources = new Set();
-  #volume = .65;
+  #volume = 1;
   #muted = false;
 
   get muted() { return this.#muted; }

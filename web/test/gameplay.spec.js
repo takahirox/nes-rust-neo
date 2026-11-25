@@ -10,7 +10,7 @@ for (const [name, replay] of Object.entries(replays)) {
   test(`${name} runs five minutes through the production Wasm core`, async ({ page }) => {
     test.setTimeout(180_000);
     await page.goto('./');
-    await expect(page.getByRole('button', { name: 'Open ROM', exact: true })).toBeEnabled();
+    await expect(page.getByRole('button', { name: 'Insert cartridge', exact: true })).toBeEnabled();
     const rom = [...await readFile(pickup(name))];
     const result = await page.evaluate(async ({ rom, replay, frames }) => {
       const { loadCore } = await import(new URL('wasm.js', location.href));
@@ -81,8 +81,9 @@ test('Orbit Salvage plays real game-generated audio through the app', async ({ p
     };
   });
   await page.goto('./');
+  await page.getByRole('button', { name: 'Insert cartridge', exact: true }).click();
   const chooser = page.waitForEvent('filechooser');
-  await page.getByRole('button', { name: 'Open ROM', exact: true }).click();
+  await page.getByRole('button', { name: 'Open local ROM' }).click();
   await (await chooser).setFiles(fileURLToPath(pickup('orbit')));
   await expect(page.getByRole('button', { name: 'Pause', exact: true })).toBeEnabled();
   // Allow the cartridge to finish its power-on/VBlank initialization.
