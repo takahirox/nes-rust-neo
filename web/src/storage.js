@@ -307,6 +307,7 @@ export class BatterySaves {
   }
 
   async replace(session, bytes) {
+    await session.writing;
     const key = savePrefix + session.id;
     const raw = encode(bytes);
     await navigator.locks.request(key, () => {

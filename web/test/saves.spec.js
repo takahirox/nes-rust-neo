@@ -313,6 +313,14 @@ test('battery profiles adopt Save 1, retain displaced progress and abort failed 
   await button(page, 'Play').click();
   await progress(page, 4);
   await pause(page);
+  const storedByte = () => page.evaluate(key => atob(localStorage.getItem(key)).charCodeAt(0), baseKey);
+  await expect.poll(storedByte).toBe(4);
+  // Advance the live SRAM without running the browser's autosave loop.
+  await page.evaluate(() => {
+    window.machine.run_frame(1, 0);
+    window.machine.run_frame(1, 0);
+  });
+  expect(await ram(page, 0x6000)).toBe(5);
   const newerFrame = await canvasImage(page);
   await page.evaluate(key => { window.failedSnapshot = true; window.failedRecovery = key; }, baseKey);
   await button(page, 'Save state').click();
@@ -324,10 +332,10 @@ test('battery profiles adopt Save 1, retain displaced progress and abort failed 
 
   await button(page, 'Load state').click();
   await expect(page.locator('#status')).toHaveText(/State load stopped.*Injected recovery write failure/);
-  expect(await ram(page, 0x6000)).toBe(4);
+  expect(await ram(page, 0x6000)).toBe(5);
   expect(await canvasImage(page)).toBe(newerFrame);
   await expect(button(page, 'Play')).toBeEnabled();
-  expect(await page.evaluate(key => atob(localStorage.getItem(key)).charCodeAt(0), baseKey)).toBe(4);
+  expect(await storedByte()).toBe(4);
 
   await page.evaluate(() => {
     delete window.failedRecovery;
@@ -336,14 +344,15 @@ test('battery profiles adopt Save 1, retain displaced progress and abort failed 
   });
   await button(page, 'Load state').click();
   await expect(page.locator('#status')).toHaveText(/State load stopped.*Injected profile catalog failure/);
-  expect(await ram(page, 0x6000)).toBe(4);
+  expect(await ram(page, 0x6000)).toBe(5);
+  expect(await storedByte()).toBe(4);
   expect(await page.evaluate(key => Object.keys(localStorage).filter(item => item.startsWith(key + ':')), baseKey)).toEqual([]);
 
   await page.evaluate(() => { delete window.failedCatalog; });
   await button(page, 'Load state').click();
   await expect(page.locator('#status')).toHaveText(/Previous progress.*recovery profile/);
   expect(await ram(page, 0x6000)).toBe(3);
-  expect(await page.evaluate(key => atob(localStorage.getItem(key)).charCodeAt(0), baseKey)).toBe(3);
+  expect(await storedByte()).toBe(3);
 
   let profiles = await nativeProfiles(page, 'Save 1');
   await button(profiles, 'Remove Save 1').click();
@@ -351,10 +360,10 @@ test('battery profiles adopt Save 1, retain displaced progress and abort failed 
   const recovery = await profiles.getByRole('button', { name: /^Recovery ·/ }).textContent();
   await button(profiles, recovery).click();
   await expect(button(page, 'Play')).toBeEnabled();
-  expect(await ram(page, 0x6000)).toBe(4);
+  expect(await ram(page, 0x6000)).toBe(5);
   await button(page, 'Reset').click();
   await expect(button(page, 'Play')).toBeEnabled();
-  expect(await ram(page, 0x6000)).toBe(4);
+  expect(await ram(page, 0x6000)).toBe(5);
   picker = await browse(page);
   await expect(states(page)).toHaveCount(0);
   await button(picker, 'Close').click();
@@ -364,12 +373,27 @@ test('battery profiles adopt Save 1, retain displaced progress and abort failed 
   profiles = await nativeProfiles(page, 'Save 2');
   const sram = await exportFrom(page, button(profiles, 'Export current save data'), '.srm');
   expect(sram.buffer.length).toBe(8192);
-  expect(sram.buffer[0]).toBe(4);
+  expect(sram.buffer[0]).toBe(5);
+  await page.evaluate(() => {
+    const core = window.machine;
+    for (let i = 0; i < 60 && core.debug_peek_ram(0) !== 0xa5; i++) core.run_frame(0, 0);
+  });
+  expect(await ram(page, 0)).toBe(0xa5);
   await page.locator('#save-data-file').setInputFiles({ ...sram, buffer: Buffer.alloc(1) });
   await expect(page.locator('#save-data-message')).toHaveText(/8192-byte SRAM file from this ROM/);
+  sram.buffer[0] = 7;
   await page.locator('#save-data-file').setInputFiles(sram);
+  await expect(page.locator('#save-data-message')).toHaveText(/Imported as Save 3/);
+  await expect(button(profiles, 'Save 2')).toHaveAttribute('aria-current', 'true');
+  await expect(page.locator('#active-save-name')).toHaveText('Save 2');
+  await expect(page.locator('#play')).toHaveText('Play');
+  expect(await ram(page, 0)).toBe(0xa5);
+  expect(await ram(page, 0x6000)).toBe(5);
+  await button(profiles, 'Save 3').click();
+  await expect(button(page, 'Play')).toBeEnabled();
+  expect(await ram(page, 0)).toBe(0);
+  expect(await ram(page, 0x6000)).toBe(7);
   profiles = await nativeProfiles(page, 'Save 3');
-  expect(await ram(page, 0x6000)).toBe(4);
   await button(profiles, 'New save').click();
   profiles = await nativeProfiles(page, 'Save 4');
   expect(await ram(page, 0x6000)).toBe(0);
