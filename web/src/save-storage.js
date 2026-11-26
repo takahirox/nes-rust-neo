@@ -23,10 +23,12 @@ export function writeProfiles(game, catalog) {
   localStorage.setItem(profilePrefix + game, JSON.stringify(catalog));
 }
 
-export function addProfile(catalog, recovery) {
+export function addProfile(catalog, recoverySource) {
   const profile = {
     id: crypto.randomUUID(),
-    name: recovery ? `Recovery · ${new Date().toLocaleString()}` : `Save ${catalog.next++}`,
+    name: recoverySource
+      ? `Recovery · ${recoverySource} · ${new Date().toLocaleString()}`
+      : `Save ${catalog.next++}`,
   };
   catalog.profiles.push(profile);
   return profile;

@@ -107,14 +107,20 @@ async function reopenBattery(page) {
   expect(await ram(page, 0x6000)).toBe(1);
 }
 
-test('loading a state flushes matching unsaved SRAM before activating it', async ({ page }) => {
+test('loading a state with matching live SRAM saves it and backs up the older stored SRAM', async ({ page }) => {
   await ready(page);
   await openWithUnsavedSram(page);
   await save(page);
   await button(page, 'Load state').click();
-  await expect(page.locator('#status')).toHaveText('State loaded.');
+  await expect(page.locator('#status')).toHaveText(/Previous progress.*a recovery profile/);
   await expect(button(page, 'Play')).toBeEnabled();
   await reopenBattery(page);
+  await pause(page);
+  const profiles = await nativeProfiles(page, 'Save 1');
+  await expect(profiles.getByRole('button', { name: /^Recovery ·/ })).toHaveCount(1);
+  await profiles.getByRole('button', { name: /^Recovery · Last saved progress ·/ }).click();
+  await expect(button(page, 'Play')).toBeEnabled();
+  expect(await ram(page, 0x6000)).toBe(0);
 });
 
 test('reloading while an IndexedDB state write is queued preserves SRAM', async ({ page }) => {
@@ -281,7 +287,10 @@ test('battery profiles adopt Save 1, retain displaced progress and abort failed 
     const write = Storage.prototype.setItem;
     Storage.prototype.setItem = function (key, data) {
       if (window.failedRecovery && key.startsWith(window.failedRecovery + ':')) {
-        throw new DOMException('Injected recovery write failure', 'QuotaExceededError');
+        if (window.failedRecoveryAfter === 0) {
+          throw new DOMException('Injected recovery write failure', 'QuotaExceededError');
+        }
+        window.failedRecoveryAfter--;
       }
       if (window.failedCatalog && key.startsWith('nes-rust-neo/profiles-v1/')) {
         throw new DOMException('Injected profile catalog failure', 'QuotaExceededError');
@@ -322,7 +331,11 @@ test('battery profiles adopt Save 1, retain displaced progress and abort failed 
   });
   expect(await ram(page, 0x6000)).toBe(5);
   const newerFrame = await canvasImage(page);
-  await page.evaluate(key => { window.failedSnapshot = true; window.failedRecovery = key; }, baseKey);
+  await page.evaluate(key => {
+    window.failedSnapshot = true;
+    window.failedRecovery = key;
+    window.failedRecoveryAfter = 1;
+  }, baseKey);
   await button(page, 'Save state').click();
   await expect(page.locator('#status')).toHaveText(/Could not save the state.*Injected snapshot write failure/);
   picker = await browse(page);
@@ -336,6 +349,7 @@ test('battery profiles adopt Save 1, retain displaced progress and abort failed 
   expect(await canvasImage(page)).toBe(newerFrame);
   await expect(button(page, 'Play')).toBeEnabled();
   expect(await storedByte()).toBe(4);
+  expect(await page.evaluate(key => Object.keys(localStorage).filter(item => item.startsWith(key + ':')), baseKey)).toEqual([]);
 
   await page.evaluate(() => {
     delete window.failedRecovery;
@@ -350,15 +364,23 @@ test('battery profiles adopt Save 1, retain displaced progress and abort failed 
 
   await page.evaluate(() => { delete window.failedCatalog; });
   await button(page, 'Load state').click();
-  await expect(page.locator('#status')).toHaveText(/Previous progress.*recovery profile/);
+  await expect(page.locator('#status')).toHaveText(/Previous progress.*recovery profiles/);
   expect(await ram(page, 0x6000)).toBe(3);
   expect(await storedByte()).toBe(3);
 
   let profiles = await nativeProfiles(page, 'Save 1');
   await button(profiles, 'Remove Save 1').click();
   await expect(page.locator('#save-data-message')).toHaveText(/Remove the saved states for Save 1/);
-  const recovery = await profiles.getByRole('button', { name: /^Recovery ·/ }).textContent();
-  await button(profiles, recovery).click();
+  await expect(profiles.getByRole('button', { name: /^Recovery ·/ })).toHaveCount(2);
+  const lastSaved = profiles.getByRole('button', { name: /^Recovery · Last saved progress ·/ });
+  const lastSavedName = await lastSaved.textContent();
+  await lastSaved.click();
+  await expect(button(page, 'Play')).toBeEnabled();
+  expect(await ram(page, 0x6000)).toBe(4);
+  profiles = await nativeProfiles(page, lastSavedName);
+  const currentProgress = profiles.getByRole('button', { name: /^Recovery · Current progress ·/ });
+  const recovery = await currentProgress.textContent();
+  await currentProgress.click();
   await expect(button(page, 'Play')).toBeEnabled();
   expect(await ram(page, 0x6000)).toBe(5);
   await button(page, 'Reset').click();

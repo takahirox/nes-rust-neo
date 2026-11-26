@@ -173,7 +173,11 @@ async function injectDiskFailures(page) {
           return original.call(this, 'malformed-disk-save');
         }
         if (this.name === 'data' && key?.startsWith?.(window.failDiskPrefix ?? 'fds-') && window.failDisk === method) {
-          throw new DOMException('Injected disk storage failure', 'QuotaExceededError');
+          if (!(window.failDiskAfter > 0)) {
+            throw new DOMException('Injected disk storage failure', 'QuotaExceededError');
+          }
+          window.failDiskAfter--;
+          window.diskKeyWrittenBeforeFailure = key;
         }
         return original.apply(this, args);
       };
@@ -692,6 +696,7 @@ test('FDS states restore pending sides and isolate, migrate, and recover writabl
   await page.evaluate(id => {
     window.failDisk = 'put';
     window.failDiskPrefix = id + ':';
+    window.failDiskAfter = 1;
   }, id);
   await button(page, 'Load state').click();
   await expect(page.locator('#status')).toHaveText(/State load stopped.*Injected disk storage failure/);
@@ -701,10 +706,13 @@ test('FDS states restore pending sides and isolate, migrate, and recover writabl
   await expect(button(page, 'Play')).toBeEnabled();
   expect(await diskStorage(page, id)).toEqual([0x13, 0x22, 0x33]);
   expect(await page.evaluate(id => localStorage.getItem('nes-rust-neo/profiles-v1/' + id), id)).toBeNull();
+  const partialRecoveryKey = await page.evaluate(() => window.diskKeyWrittenBeforeFailure);
+  expect(partialRecoveryKey).toContain(id + ':');
+  expect(await diskStorage(page, partialRecoveryKey)).toBeUndefined();
 
   await page.evaluate(() => { delete window.failDisk; });
   await button(page, 'Load state').click();
-  await expect(page.locator('#status')).toHaveText(/Previous progress.*recovery profile/);
+  await expect(page.locator('#status')).toHaveText(/Previous progress.*recovery profiles/);
   expect(await diskBytes()).toEqual([0x12, 0x22, 0x33]);
   expect(await diskStorage(page, id)).toEqual([0x12, 0x22, 0x33]);
   await openProfiles('Save 1');
@@ -723,7 +731,14 @@ test('FDS states restore pending sides and isolate, migrate, and recover writabl
   expect(await peek(page, 0x10)).toBe(1);
 
   await openProfiles('Save 1');
-  const recover = profilePicker.getByRole('button', { name: /^Recovery ·/ });
+  await expect(profilePicker.getByRole('button', { name: /^Recovery ·/ })).toHaveCount(2);
+  const lastSaved = profilePicker.getByRole('button', { name: /^Recovery · Last saved progress ·/ });
+  const lastSavedName = await lastSaved.textContent();
+  await lastSaved.click();
+  await expect(button(page, 'Play')).toBeEnabled();
+  expect(await diskBytes()).toEqual([0x13, 0x22, 0x33]);
+  await openProfiles(lastSavedName);
+  const recover = profilePicker.getByRole('button', { name: /^Recovery · Current progress ·/ });
   const recoveryName = await recover.textContent();
   await recover.click();
   await expect(button(page, 'Play')).toBeEnabled();
