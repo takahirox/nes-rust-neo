@@ -506,8 +506,7 @@ fn dmc_fetch_extends_oam_dma_without_losing_bytes() {
     }
 }
 
-fn snapshot_cart(mapper: u8, battery: bool) -> Vec<u8> {
-    let banks = if [0, 3].contains(&mapper) { 1 } else { 4 };
+fn snapshot_cart(mapper: u8, banks: u8, battery: bool) -> Vec<u8> {
     let chr = if mapper == 3 { 4 } else { 0 };
     let mut image = rom(mapper, banks, chr, u8::from(battery) * 2);
     // Sample controller shift register, change palette and RAM, and loop.
@@ -518,10 +517,15 @@ fn snapshot_cart(mapper: u8, battery: bool) -> Vec<u8> {
     ];
     let prg_end = 16 + usize::from(banks) * 16384;
     for bank in 0..usize::from(banks) {
-        image[16 + bank * 16384] = 0x90 | bank as u8;
+        image[16 + bank * 16384] = 0x90 + bank as u8;
     }
     image[prg_end - 0x1f00..][..code.len()].copy_from_slice(&code);
     image[prg_end - 6..prg_end].copy_from_slice(&[0, 0xe1, 0, 0xe1, 0, 0xe1]);
+    if banks == 32 {
+        // Reset reads the vector in the lower half before the test switches banks.
+        let lower_end = 16 + 16 * 16384;
+        image[lower_end - 4..lower_end - 2].copy_from_slice(&[0, 0xe1]);
+    }
     if mapper == 3 {
         image[16] = 0xff;
         for bank in 0..4 {
@@ -535,20 +539,30 @@ fn snapshot_cart(mapper: u8, battery: bool) -> Vec<u8> {
 fn snapshot_continuation_for_every_cartridge_mapper() {
     use crate::snapshot::hash;
 
-    for (mapper, battery) in [
-        (0, false),
-        (0, true),
-        (1, true),
-        (2, false),
-        (3, false),
-        (4, true),
+    for (mapper, banks, battery) in [
+        (0, 1, false),
+        (0, 1, true),
+        (1, 4, true),
+        (1, 32, true),
+        (2, 4, false),
+        (3, 1, false),
+        (4, 4, true),
     ] {
-        let image = snapshot_cart(mapper, battery);
+        let image = snapshot_cart(mapper, banks, battery);
         let mut nes = Nes::from_ines(&image).unwrap();
         nes.bus.write(0x6000, 0x81);
         nes.bus.board.chr_write(0, 0xa5);
         match mapper {
             1 => {
+                if banks == 32 {
+                    // SUROM uses CHR bank 0 bit 4 to select the upper PRG half.
+                    for (addr, value) in [(0xa000, 0x10), (0xe000, 3)] {
+                        for shift in 0..5 {
+                            nes.bus.write(addr, (value >> shift) & 1);
+                            nes.bus.read(0);
+                        }
+                    }
+                }
                 for _ in 0..4 {
                     nes.bus.write(0x8000, 1);
                     nes.bus.read(0);
@@ -625,6 +639,10 @@ fn snapshot_continuation_for_every_cartridge_mapper() {
         match mapper {
             1 => {
                 assert_eq!(restored.bus.board.mirroring(), Mirroring::Horizontal);
+                if banks == 32 {
+                    assert_eq!(restored.bus.board.cpu_read(0x8000, 0), 0xa3);
+                    assert_eq!(restored.bus.board.cpu_read(0xc000, 0), 0xaf);
+                }
                 for machine in [&mut nes, &mut restored] {
                     machine.bus.write(0xe000, 1);
                     assert_eq!(machine.bus.board.cpu_read(0x6000, 0x55), 0x55);
@@ -662,7 +680,7 @@ fn snapshot_continuation_for_every_cartridge_mapper() {
 #[test]
 fn snapshot_rejection_preserves_live_machine() {
     use crate::snapshot::hash;
-    let image = snapshot_cart(0, true);
+    let image = snapshot_cart(0, 1, true);
     let mut other_image = image.clone();
     other_image[16] ^= 1;
     let other = Nes::from_ines(&other_image).unwrap();

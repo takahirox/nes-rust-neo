@@ -511,25 +511,35 @@ async function removeProfile(profile) {
     throw new Error(`Remove the saved states for ${profile.name} before removing this profile.`);
   }
   if (!confirm(`Remove ${profile.name} and its game save data?`)) return;
-  catalog.profiles = catalog.profiles.filter(item => item.id !== profile.id);
+  const updated = { ...catalog, profiles: catalog.profiles.filter(item => item.id !== profile.id) };
   try {
+    let replacement;
+    let newProfile;
+    let save;
     if (profile.id === active.profile.id) {
       await flushRequired();
-      let replacement = catalog.profiles[0];
-      let save = await prepareProfile(replacement);
+      replacement = updated.profiles[0];
+      save = await prepareProfile(replacement);
       if (replacement) {
-        catalog.selected = replacement.id;
-        writeProfiles(active.id, catalog);
+        updated.selected = replacement.id;
       } else {
-        replacement = addProfile(catalog);
-        save = await persistNewProfile(catalog, replacement, nativeBytes(true), true);
+        replacement = newProfile = addProfile(updated);
       }
+    }
+    if (newProfile) save = await persistNewProfile(updated, newProfile, nativeBytes(true), true);
+    else writeProfiles(active.id, updated);
+    try {
+      await removeNative(profile);
+    } catch (error) {
+      // Keep the original record reachable if native storage rejects the deletion.
+      writeProfiles(active.id, catalog);
+      if (newProfile) await removeNative(newProfile).catch(() => {});
+      throw error;
+    }
+    if (replacement) {
       Object.assign(active, { profile: replacement, save });
       activatePrepared();
-    } else {
-      writeProfiles(active.id, catalog);
     }
-    await removeNative(profile);
     return true;
   } finally {
     core.discard();
@@ -541,10 +551,11 @@ async function restoreState(bytes) {
     core.prepareSnapshot(bytes);
     let recovery;
     if (active.profile) {
+      // The live bytes may still be dirty even when they match the snapshot.
+      await flushRequired();
       const restored = nativeBytes(true);
       const previous = nativeBytes();
       if (restored.length !== previous.length || !restored.every((value, i) => value === previous[i])) {
-        await flushRequired();
         const catalog = readProfiles(active.id);
         recovery = addProfile(catalog, true);
         try {
@@ -751,7 +762,7 @@ document.addEventListener('fullscreenchange', () => {
 });
 document.addEventListener('visibilitychange', () => {
   clearTransient();
-  if (!busy) flushSave();
+  if (document.hidden || !busy) flushSave();
   if (document.hidden) sound.suspend().catch(soundError);
   else if (running) sound.resume().catch(soundError);
   syncUI();
@@ -765,7 +776,7 @@ window.addEventListener('beforeunload', event => {
 });
 window.addEventListener('pagehide', () => {
   clearTransient();
-  if (!busy) flushSave();
+  flushSave();
 });
 
 function animate(now) {
