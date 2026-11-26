@@ -59,10 +59,25 @@ export class DiskSave {
     this.revision = 0;
   }
 
-  async load(key, core) {
+  async #readRecord(key) {
     const record = await access(this.db, 'readonly', store => store.get(key));
+    if (record !== undefined && !(record?.bytes instanceof Uint8Array)) {
+      throw new Error('The stored disk data is invalid.');
+    }
+    return record;
+  }
+
+  async readProfile(key) {
+    await this.writing?.promise;
+    const record = await this.#readRecord(key);
     if (record === undefined) return;
-    if (!(record.bytes instanceof Uint8Array)) throw new Error('The stored disk data is invalid.');
+    if (record.version !== 2) throw new Error('The stored disk data is invalid.');
+    return record.bytes;
+  }
+
+  async load(key, core) {
+    const record = await this.#readRecord(key);
+    if (record === undefined) return;
     // Save 1 adopts the old key. Replace the legacy record only after validation.
     if (record.version === 1 && key === this.id && core.restore(record.bytes, true)) {
       await this.write(key, core.diskSave(true));

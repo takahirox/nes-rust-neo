@@ -72,13 +72,14 @@ History reads are paged. State export can be imported into another profile
 with the same media and BIOS. The selected target is remembered per game and
 profile while the page stays open.
 
-Before loading a state that changes native data, the browser saves the live
-progress, stores a named recovery copy, and writes the restored native data.
-Only then does it install the validated machine. If a required write fails,
-the running machine stays available and the user can retry. Select the
-**Recovery** profile to restart with the displaced progress. Deleting a game
-from the library retains its profiles and states. Profile removal requires
-removing any attached states first.
+Before loading a state, the browser compares its native data with the live
+progress and the last persisted save. It stores each distinct version that
+differs from the state in a named **Recovery** profile before writing the
+restored native data. Only then does it install the validated machine. If a
+required write fails, the running machine stays available and the user can
+retry. Select a **Recovery** profile to restart with that version of progress.
+Deleting a game from the library retains its profiles and states. Profile
+removal requires removing any attached states first.
 
 Use a single tab for a game and its profiles. FDS takes a single-writer lock
 for the whole disk, regardless of which profile is selected. Concurrent edits

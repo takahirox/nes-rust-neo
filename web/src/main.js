@@ -559,33 +559,68 @@ async function removeProfile(profile) {
   }
 }
 
+function sameBytes(first, second) {
+  return first.length === second.length && first.every((value, i) => value === second[i]);
+}
+
+async function preserveDisplacedProgress(copies) {
+  if (!copies.length) return;
+  const catalog = readProfiles(active.id);
+  const written = [];
+  try {
+    for (const { source, bytes } of copies) {
+      const profile = addProfile(catalog, source);
+      await writeNative(profile, bytes);
+      written.push(profile);
+    }
+    writeProfiles(active.id, catalog);
+  } catch (error) {
+    // Publish the recovery profiles only after all copies have been stored.
+    for (const profile of written) await removeNative(profile).catch(() => {});
+    throw error;
+  }
+}
+
+async function restoreNativeProgress() {
+  const restored = nativeBytes(true);
+  const live = nativeBytes();
+  const stored = active.diskSave
+    ? await active.diskSave.readProfile(nativeKey(active.id, active.profile.id))
+    : await saves.readProfile(active.save);
+  const matchesLive = sameBytes(restored, live);
+  const copies = [];
+  if (!matchesLive) copies.push({ source: 'Current progress', bytes: live });
+  if (stored && !sameBytes(stored, restored) && !sameBytes(stored, live)) {
+    copies.push({ source: 'Last saved progress', bytes: stored });
+  }
+  await preserveDisplacedProgress(copies);
+  if (matchesLive) {
+    // Persist matching live bytes before activation resets the save revision.
+    await flushRequired();
+  } else if (active.diskSave) {
+    await writeNative(active.profile, restored);
+  } else {
+    await saves.replace(active.save, restored);
+  }
+  return copies.length;
+}
+
 async function restoreState(entry) {
   // Defer lifecycle saves while the load checks and stores native progress.
   restoringState = true;
   try {
     core.prepareSnapshot(await readState(entry));
-    let recovery;
+    let recoveries = 0;
     if (active.profile) {
-      const restored = nativeBytes(true);
-      const previous = nativeBytes();
-      if (restored.length === previous.length && restored.every((value, i) => value === previous[i])) {
-        // Persist matching live bytes before activation resets the save revision.
-        await flushRequired();
-      } else {
-        const catalog = readProfiles(active.id);
-        recovery = addProfile(catalog, true);
-        try {
-          // Back up live progress before writing anything to the active profile.
-          await persistNewProfile(catalog, recovery, previous);
-          if (active.diskSave) await writeNative(active.profile, restored);
-          else await saves.replace(active.save, restored);
-        } catch (error) {
-          throw new Error(`State load stopped because save data could not be stored. Check browser storage and retry. ${error.message}`);
-        }
+      try {
+        recoveries = await restoreNativeProgress();
+      } catch (error) {
+        throw new Error(`State load stopped because save data could not be stored. Check browser storage and retry. ${error.message}`);
       }
     }
     activatePrepared();
-    if (recovery) notice('State loaded. Previous progress is in Save data as a recovery profile.');
+    if (recoveries > 1) notice('State loaded. Previous progress is in Save data as recovery profiles.');
+    else if (recoveries) notice('State loaded. Previous progress is in Save data as a recovery profile.');
     else notice('State loaded.', 3000);
   } finally {
     core.discard();
