@@ -37,7 +37,7 @@ const scopeFor = active => ({ game: active.id, profile: active.profile?.id ?? 'g
 const scopeKey = ({ game, profile }) => `${game}/${profile}`;
 const stateName = ({ time }) => date.format(time);
 
-export function createSaveControls({ current, operate, notice, restoreState, changeProfile, removeProfile }) {
+export function createSaveControls({ current, operate, notice, restoreState, changeProfile, importProfile, removeProfile }) {
   const states = get('state-picker');
   const profiles = get('save-data-dialog');
   const stateMessage = get('state-message');
@@ -201,7 +201,7 @@ export function createSaveControls({ current, operate, notice, restoreState, cha
   get('load-state').onclick = () => operate(async () => {
     const entry = selected(current().active);
     try {
-      await restoreState(await readState(entry));
+      await restoreState(entry);
     } catch (error) {
       if (error.name === 'StateUnavailable') select(entry, undefined);
       throw new Error(`Could not load the state. ${error.message}`);
@@ -290,8 +290,9 @@ export function createSaveControls({ current, operate, notice, restoreState, cha
         throw new Error(active.diskSave ? 'This disk save exceeds the supported size.'
           : `Choose a raw ${active.size}-byte SRAM file from this ROM.`);
       }
-      await changeProfile({ bytes: new Uint8Array(await file.arrayBuffer()) });
-      profiles.close();
+      const profile = await importProfile(new Uint8Array(await file.arrayBuffer()));
+      renderProfiles();
+      profileMessage.textContent = `Imported as ${profile.name}. Select it to play.`;
     });
   };
 

@@ -3,7 +3,7 @@ import { biosSize, DiskSave, forgetBios, readBios, writeBios } from './disk-stor
 import { Sound } from './audio.js';
 import { controls } from './controls.js';
 import { createSaveControls } from './saves.js';
-import { addProfile, hasStates, nativeKey, readProfiles, writeProfiles } from './save-storage.js';
+import { addProfile, hasStates, nativeKey, readProfiles, readState, writeProfiles } from './save-storage.js';
 import {
   BatterySaves, identify, listGames, preferencesKey, remember, remembered, removeGame,
 } from './storage.js';
@@ -38,6 +38,7 @@ let biosRequest;
 let biosRemembered = false;
 let running = false;
 let busy = false;
+let restoringState = false;
 let previous;
 let budget = 0;
 let lastSave = 0;
@@ -83,7 +84,7 @@ function enabled() {
 }
 const pads = controls(document.querySelector('.touch'), enabled, unlockAudio);
 const saveControls = createSaveControls({
-  current: () => ({ active, busy, core }), operate, notice, restoreState, changeProfile, removeProfile,
+  current: () => ({ active, busy, core }), operate, notice, restoreState, changeProfile, importProfile, removeProfile,
 });
 
 function syncUI() {
@@ -482,14 +483,14 @@ function activatePrepared() {
   warn('save', '');
 }
 
-async function changeProfile({ id, duplicate, bytes } = {}) {
+async function changeProfile({ id, duplicate } = {}) {
   if (id === active.profile.id) return;
   try {
     await flushRequired();
     const catalog = readProfiles(active.id);
     let profile = catalog.profiles.find(item => item.id === id);
     if (id && !profile) throw new Error('This profile is unavailable.');
-    let save = await prepareProfile(profile, duplicate ? nativeBytes() : bytes);
+    let save = await prepareProfile(profile, duplicate ? nativeBytes() : undefined);
     if (profile) {
       catalog.selected = profile.id;
       writeProfiles(active.id, catalog);
@@ -500,6 +501,18 @@ async function changeProfile({ id, duplicate, bytes } = {}) {
     Object.assign(active, { profile, save });
     activatePrepared();
     notice(`Restarted with ${profile.name}.`);
+  } finally {
+    core.discard();
+  }
+}
+
+async function importProfile(bytes) {
+  try {
+    await prepareProfile(undefined, bytes);
+    const catalog = readProfiles(active.id);
+    const profile = addProfile(catalog);
+    await persistNewProfile(catalog, profile, nativeBytes(true));
+    return profile;
   } finally {
     core.discard();
   }
@@ -546,19 +559,23 @@ async function removeProfile(profile) {
   }
 }
 
-async function restoreState(bytes) {
+async function restoreState(entry) {
+  // Defer lifecycle saves while the load checks and stores native progress.
+  restoringState = true;
   try {
-    core.prepareSnapshot(bytes);
+    core.prepareSnapshot(await readState(entry));
     let recovery;
     if (active.profile) {
-      // The live bytes may still be dirty even when they match the snapshot.
-      await flushRequired();
       const restored = nativeBytes(true);
       const previous = nativeBytes();
-      if (restored.length !== previous.length || !restored.every((value, i) => value === previous[i])) {
+      if (restored.length === previous.length && restored.every((value, i) => value === previous[i])) {
+        // Persist matching live bytes before activation resets the save revision.
+        await flushRequired();
+      } else {
         const catalog = readProfiles(active.id);
         recovery = addProfile(catalog, true);
         try {
+          // Back up live progress before writing anything to the active profile.
           await persistNewProfile(catalog, recovery, previous);
           if (active.diskSave) await writeNative(active.profile, restored);
           else await saves.replace(active.save, restored);
@@ -572,6 +589,7 @@ async function restoreState(bytes) {
     else notice('State loaded.', 3000);
   } finally {
     core.discard();
+    restoringState = false;
   }
 }
 
@@ -762,7 +780,7 @@ document.addEventListener('fullscreenchange', () => {
 });
 document.addEventListener('visibilitychange', () => {
   clearTransient();
-  if (document.hidden || !busy) flushSave();
+  if (!restoringState && (document.hidden || !busy)) flushSave();
   if (document.hidden) sound.suspend().catch(soundError);
   else if (running) sound.resume().catch(soundError);
   syncUI();
@@ -776,7 +794,7 @@ window.addEventListener('beforeunload', event => {
 });
 window.addEventListener('pagehide', () => {
   clearTransient();
-  flushSave();
+  if (!restoringState) flushSave();
 });
 
 function animate(now) {

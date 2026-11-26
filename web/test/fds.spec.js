@@ -172,7 +172,7 @@ async function injectDiskFailures(page) {
         if (this.name === 'data' && key?.startsWith?.('fds-') && method === 'get' && window.failDisk === 'corrupt') {
           return original.call(this, 'malformed-disk-save');
         }
-        if (this.name === 'data' && key?.startsWith?.('fds-') && window.failDisk === method) {
+        if (this.name === 'data' && key?.startsWith?.(window.failDiskPrefix ?? 'fds-') && window.failDisk === method) {
           throw new DOMException('Injected disk storage failure', 'QuotaExceededError');
         }
         return original.apply(this, args);
@@ -673,22 +673,43 @@ test('FDS states restore pending sides and isolate, migrate, and recover writabl
   await button(page, 'Play').click();
   await deliver(page);
   await changeSide(page, 2);
-  await deliver(page);
   await button(page, 'Pause').click();
+  await expect.poll(() => diskStorage(page, id)).toEqual([0x13, 0x22, 0x33]);
+  // Deliver on side two with the UI paused so only the live disk changes.
+  await page.evaluate(() => {
+    const core = window.emulator;
+    const target = core.debug_peek_ram(0x18);
+    for (let i = 0; i < 240; i++) {
+      const position = core.debug_peek_ram(0x11);
+      if (Math.abs(target - position) <= 2) break;
+      core.run_frame(position < target ? 0x80 : 0x40, 0);
+    }
+    const deliveries = core.debug_peek_ram(0x13);
+    for (let i = 0; i < 600 && core.debug_peek_ram(0x13) === deliveries; i++) core.run_frame(1, 0);
+  });
   expect(await diskBytes()).toEqual([0x13, 0x23, 0x33]);
-  await expect.poll(() => diskStorage(page, id)).toEqual([0x13, 0x23, 0x33]);
-  await page.evaluate(() => { window.failDisk = 'put'; });
+  const beforeFailedLoad = await frame(page);
+  await page.evaluate(id => {
+    window.failDisk = 'put';
+    window.failDiskPrefix = id + ':';
+  }, id);
   await button(page, 'Load state').click();
   await expect(page.locator('#status')).toHaveText(/State load stopped.*Injected disk storage failure/);
   expect(await diskBytes()).toEqual([0x13, 0x23, 0x33]);
+  expect(await frame(page)).toBe(beforeFailedLoad);
   await expect(page.getByLabel('Disk side')).toHaveValue('1');
   await expect(button(page, 'Play')).toBeEnabled();
-  expect(await diskStorage(page, id)).toEqual([0x13, 0x23, 0x33]);
+  expect(await diskStorage(page, id)).toEqual([0x13, 0x22, 0x33]);
+  expect(await page.evaluate(id => localStorage.getItem('nes-rust-neo/profiles-v1/' + id), id)).toBeNull();
 
   await page.evaluate(() => { delete window.failDisk; });
   await button(page, 'Load state').click();
   await expect(page.locator('#status')).toHaveText(/Previous progress.*recovery profile/);
   expect(await diskBytes()).toEqual([0x12, 0x22, 0x33]);
+  expect(await diskStorage(page, id)).toEqual([0x12, 0x22, 0x33]);
+  await openProfiles('Save 1');
+  const saveOneFile = await exportFile(button(profilePicker, 'Export current save data'), /\.fds-save$/);
+  await button(profilePicker, 'Close').click();
   await openStates();
   await expect(rows).toHaveCount(2);
   await page.locator('#state-file').setInputFiles(exportedState);
@@ -718,9 +739,23 @@ test('FDS states restore pending sides and isolate, migrate, and recover writabl
   await openProfiles('Save 2');
   const diskFile = await exportFile(button(profilePicker, 'Export current save data'), /\.fds-save$/);
   expect(diskProgress(diskFile.buffer)).toEqual([0x13, 0x23, 0x33]);
-  await page.locator('#save-data-file').setInputFiles(diskFile);
-  await openProfiles('Save 3');
+  await button(profilePicker, 'Close').click();
+  await button(page, 'Play').click();
+  await booted(page);
+  await button(page, 'Pause').click();
+  await openProfiles('Save 2');
+  await page.locator('#save-data-file').setInputFiles(saveOneFile);
+  await expect(page.locator('#save-data-message')).toHaveText(/Imported as Save 3/);
+  await expect(button(profilePicker, 'Save 2')).toHaveAttribute('aria-current', 'true');
+  await expect(page.locator('#active-save-name')).toHaveText('Save 2');
+  await expect(page.locator('#play')).toHaveText('Play');
+  expect(await peek(page, 0x10)).toBe(1);
   expect(await diskBytes()).toEqual([0x13, 0x23, 0x33]);
+  await button(profilePicker, 'Save 3').click();
+  await expect(button(page, 'Play')).toBeEnabled();
+  expect(await peek(page, 0x10)).toBe(0);
+  expect(await diskBytes()).toEqual([0x12, 0x22, 0x33]);
+  await openProfiles('Save 3');
   await button(profilePicker, 'New save').click();
   await openProfiles('Save 4');
   expect(await diskBytes()).toEqual([0x11, 0x22, 0x33]);
