@@ -84,6 +84,68 @@ async function exportFrom(page, control, extension) {
   return { name: download.suggestedFilename(), mimeType: 'application/octet-stream', buffer: bytes };
 }
 
+async function openWithUnsavedSram(page) {
+  const media = await readFile(diagnostic);
+  const key = 'nes-rust-neo/battery-v1/' + createHash('sha256').update(media).digest('hex');
+  await page.evaluate(([key, value]) => localStorage.setItem(key, value), [key, Buffer.alloc(8192).toString('base64')]);
+  await insert(page, 'battery.nes', media);
+  await pause(page);
+  // Advance the real core with A held while the UI's frame loop and autosave are paused.
+  await page.evaluate(() => {
+    window.machine.run_frame(1, 0);
+    window.machine.run_frame(1, 0);
+  });
+  expect(await ram(page, 0x6000)).toBe(1);
+  expect(await page.evaluate(key => atob(localStorage.getItem(key)).charCodeAt(0), key)).toBe(0);
+}
+
+async function reopenBattery(page) {
+  await page.reload();
+  await button(page, 'Open game').click();
+  await button(page, 'battery.nes').click();
+  await expect(button(page, 'Pause')).toBeEnabled();
+  expect(await ram(page, 0x6000)).toBe(1);
+}
+
+test('loading a state flushes matching unsaved SRAM before activating it', async ({ page }) => {
+  await ready(page);
+  await openWithUnsavedSram(page);
+  await save(page);
+  await button(page, 'Load state').click();
+  await expect(page.locator('#status')).toHaveText('State loaded.');
+  await expect(button(page, 'Play')).toBeEnabled();
+  await reopenBattery(page);
+});
+
+test('reloading while an IndexedDB state write is queued preserves SRAM', async ({ page }) => {
+  await ready(page);
+  await openWithUnsavedSram(page);
+  const picker = await browse(page);
+  await expect(picker.getByRole('button', { name: 'New state' })).toBeEnabled();
+  await button(picker, 'Close').click();
+  await page.evaluate(async () => {
+    const db = await new Promise((resolve, reject) => {
+      const open = indexedDB.open('nes-rust-neo/states', 1);
+      open.onsuccess = () => resolve(open.result);
+      open.onerror = () => reject(open.error);
+    });
+    const store = db.transaction('snapshots', 'readwrite').objectStore('snapshots');
+    // Keep the first transaction open so the state save waits until navigation.
+    const hold = () => { store.get('hold').onsuccess = hold; };
+    hold();
+    const put = IDBObjectStore.prototype.put;
+    IDBObjectStore.prototype.put = function (...args) {
+      const request = put.apply(this, args);
+      if (this.name === 'snapshots') window.snapshotWrite = request;
+      return request;
+    };
+  });
+  await button(page, 'Save state').click();
+  await expect.poll(() => page.evaluate(() => window.snapshotWrite?.readyState)).toBe('pending');
+  await expect(button(page, 'Save state')).toBeDisabled();
+  await reopenBattery(page);
+});
+
 test('unified history saves, overwrites, validates imports and explicitly loads real NES frames', async ({ page }) => {
   const requests = [];
   const errors = [];

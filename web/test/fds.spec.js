@@ -83,6 +83,12 @@ function frame(page) {
   return page.locator('canvas').evaluate(canvas => canvas.toDataURL());
 }
 
+async function saveState(page) {
+  await button(page, 'Save state').click();
+  await expect(page.locator('#status')).toHaveText('State saved.');
+  await expect(button(page, 'Save state')).toBeEnabled();
+}
+
 async function deliver(page, initialFrame) {
   const target = await peek(page, 0x18);
   const start = await peek(page, 0x11);
@@ -159,10 +165,10 @@ function diskProgress(bytes, initial = [0x11, 0x22, 0x33]) {
 
 async function injectDiskFailures(page) {
   await page.addInitScript(() => {
-    for (const method of ['get', 'put']) {
+    for (const method of ['get', 'put', 'delete']) {
       const original = IDBObjectStore.prototype[method];
       IDBObjectStore.prototype[method] = function (...args) {
-        const key = args[method === 'get' ? 0 : 1];
+        const key = args[method === 'put' ? 1 : 0];
         if (this.name === 'data' && key?.startsWith?.('fds-') && method === 'get' && window.failDisk === 'corrupt') {
           return original.call(this, 'malformed-disk-save');
         }
@@ -508,6 +514,73 @@ for (const layout of [
   });
 }
 
+test('loading a state flushes matching unsaved disk changes before activating it', async ({ page }) => {
+  await injectDiskFailures(page);
+  const id = await saveKey(multi);
+  await ready(page);
+  await loadFile(page, multi);
+  await localBios(page);
+  await booted(page);
+  await page.evaluate(() => { window.failDisk = 'put'; });
+  await deliver(page);
+  expect(await peek(page, 0x12)).toBe(0x12);
+  await expect(page.locator('#warnings')).toHaveText(/Could not save disk changes/);
+  expect(await diskStorage(page, id)).toBeUndefined();
+  await saveState(page);
+
+  await page.evaluate(() => { delete window.failDisk; });
+  await button(page, 'Load state').click();
+  await expect(page.locator('#status')).toHaveText('State loaded.');
+  await button(page, 'Pause').click();
+  await page.reload();
+  await remembered(page, multi);
+  await booted(page);
+  expect(await peek(page, 0x12)).toBe(0x12);
+  expect(await diskStorage(page, id)).toEqual([0x12, 0x22, 0x33]);
+});
+
+test('a failed disk profile removal preserves the active machine and can be retried', async ({ page }) => {
+  await injectDiskFailures(page);
+  const id = await saveKey(multi);
+  await ready(page);
+  await loadFile(page, multi);
+  await localBios(page);
+  await booted(page);
+  const profiles = page.getByRole('dialog', { name: 'Save data' });
+  await page.locator('#save-data').click();
+  await button(profiles, 'New save').click();
+  await expect(page.locator('#active-save-name')).toHaveText('Save 2');
+  const key = await page.evaluate(id => `${id}:${JSON.parse(localStorage.getItem('nes-rust-neo/profiles-v1/' + id)).selected}`, id);
+  await changeSide(page, 2);
+  await deliver(page);
+  await button(page, 'Pause').click();
+  await expect.poll(() => diskStorage(page, key)).toEqual([0x11, 0x23, 0x33]);
+  const before = await frame(page);
+
+  await page.locator('#save-data').click();
+  await page.evaluate(() => { window.failDisk = 'delete'; });
+  page.once('dialog', dialog => dialog.accept());
+  await button(profiles, 'Remove Save 2').click();
+  await expect(page.locator('#save-data-message')).toHaveText('Injected disk storage failure');
+  await button(profiles, 'Close').click();
+  await expect(page.locator('#active-save-name')).toHaveText('Save 2');
+  await expect(button(page, 'Play')).toBeEnabled();
+  await expect(page.getByLabel('Disk side')).toHaveValue('1');
+  expect(await frame(page)).toBe(before);
+  expect(await peek(page, 0x12)).toBe(0x23);
+  expect(await diskStorage(page, key)).toEqual([0x11, 0x23, 0x33]);
+
+  await page.locator('#save-data').click();
+  await expect(button(profiles, 'Save 2')).toHaveAttribute('aria-current', 'true');
+  await page.evaluate(() => { delete window.failDisk; });
+  page.once('dialog', dialog => dialog.accept());
+  await button(profiles, 'Remove Save 2').click();
+  await expect(page.locator('#save-data-message')).toHaveText('Removed Save 2.');
+  await expect(button(profiles, 'Save 2')).toHaveCount(0);
+  await expect(page.locator('#active-save-name')).toHaveText('Save 1');
+  expect(await diskStorage(page, key)).toBeUndefined();
+});
+
 test('FDS states restore pending sides and isolate, migrate, and recover writable profiles', async ({ page }) => {
   const network = [];
   page.on('request', request => {
@@ -553,11 +626,6 @@ test('FDS states restore pending sides and isolate, migrate, and recover writabl
     return [0, 1, 2].map(side => tracks[side * 98304 + 3560]);
   });
   const openStates = () => page.locator('#choose-state').click();
-  async function save() {
-    await button(page, 'Save state').click();
-    await expect(page.locator('#status')).toHaveText('State saved.');
-    await expect(button(page, 'Save state')).toBeEnabled();
-  }
   async function openProfiles(name) {
     await expect(page.locator('#active-save-name')).toHaveText(name);
     await page.locator('#save-data').click();
@@ -575,14 +643,14 @@ test('FDS states restore pending sides and isolate, migrate, and recover writabl
 
   await button(page, 'Pause').click();
   const originalFrame = await frame(page);
-  await save();
+  await saveState(page);
   await openStates();
   await expect(rows).toHaveCount(1);
   const preview = rows.first().locator('img');
   expect(await preview.evaluate(image => image.decode().then(() => image.naturalWidth))).toBe(256);
   const initialTime = await rows.first().locator('time').getAttribute('datetime');
   await button(statePicker, 'Close').click();
-  await save();
+  await saveState(page);
   await openStates();
   await expect(rows).toHaveCount(1);
   await expect(rows.first().locator('time')).not.toHaveAttribute('datetime', initialTime);
@@ -591,7 +659,7 @@ test('FDS states restore pending sides and isolate, migrate, and recover writabl
   await expect(button(page, 'Load state')).toBeDisabled();
   await page.getByLabel('Disk side').selectOption('1');
   await expect(page.locator('#disk-status')).toHaveText('Changing side…');
-  await save();
+  await saveState(page);
   await openStates();
   await expect(rows).toHaveCount(2);
   await rows.last().getByRole('button', { name: /^Select state/ }).click();
