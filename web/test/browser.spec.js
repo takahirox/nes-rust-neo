@@ -129,7 +129,7 @@ test('production subpath, empty startup, picker, rejection, cancellation and swi
   }));
   await coreReady(page);
   const appUrl = page.url();
-  const assets = ['', 'style.css', 'main.js', 'controls.js', 'storage.js', 'disk-storage.js', 'audio.js', 'wasm.js', 'nes_wasm.wasm']
+  const assets = ['', 'style.css', 'main.js', 'controls.js', 'storage.js', 'disk-storage.js', 'save-storage.js', 'saves.js', 'audio.js', 'wasm.js', 'nes_wasm.wasm']
     .map(name => new URL(name, appUrl).href).sort();
   expect(requests.map(request => request.url).sort()).toEqual(assets);
   await expect(page.locator('#inserted')).toHaveText('None');

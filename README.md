@@ -36,9 +36,15 @@ The first disk load asks for a lawfully obtained raw 8 KiB FDS BIOS, often named
 
 Disk games start with the first side inserted. Select **Disk side** to change sides in image order, or **Eject** to leave the drive empty. While the drive is empty, select a side and press **Insert**. The game keeps running through the short ejection and insertion delay. The controls are also available in fullscreen. Side timing advances with emulation, so a change requested while paused finishes after resuming.
 
-Disk saves use SHA-256 over the original side bytes in order, with the optional 16-byte FDS header excluded. Headered and headerless copies of the same sides share one library identity and save. Browser storage keeps cartridge battery RAM and disk writes independently. Only one tab can run a given disk image at a time. If a disk read or restore fails, retry after the error is resolved. If a disk write fails, keep the current tab open and use **Retry save storage**. Switching games waits for the disk changes to be committed. For battery save conflicts the retry and recovery controls show the available versions. Clearing site data removes the library, BIOS, saves and preferences.
+## Save and resume
 
-The app requests only its own static assets. Games, names, BIOS and saves stay on the local device. The build contains no ROMs, disk images or BIOS.
+- Open **Save state ▾** to choose **New state** or a timestamped screenshot. **Save** captures the machine and overwrites the selected entry on subsequent saves. **Load** explicitly restores the target and keeps your Play or Pause setting. The picker also offers **Remove**, **Export** and **Import state**. An import creates a separate entry.
+- **Save data** appears beside battery-backed cartridges and FDS games. Select a profile to restart the game with its progress. **New save** starts fresh, **Duplicate current** copies the current progress, and **Import save data** opens the import as a separate profile. **Save 1** adopts the browser’s existing native save. Reset keeps progress in the active profile. Remove a profile’s attached states before removing the profile.
+- Loading an older state over different game-native data puts your displaced progress in a **Recovery** profile under **Save data**. If a required storage write fails, keep the current tab open and follow the retry message. Disk changes must be saved before switching games. Existing battery-save recovery controls handle conflicting legacy drafts.
+- Removing a game from **My games** retains its profiles and states. Reopening the exact NES ROM or original FDS sides brings them back. Headered and headerless FDS images use the same identity. Only one tab can run a given FDS image at a time. Concurrent editing of the same game in multiple tabs is unsupported.
+- Export important progress before clearing site data or changing browsers or origins. Use raw `.srm` with the same NES ROM and `.fds-save` with the same original disk. A `.nesstate` uses the exact ROM or disk image, its original FDS BIOS when applicable, and a compatible emulator build. Browser storage is best-effort and may be cleared, evicted or exhausted.
+
+See the [snapshot format and storage policy](docs/save-states.md) for details. The app requests only its own static assets. Games, names, BIOS and saves stay local. The build contains no game media or BIOS.
 
 ## Test
 

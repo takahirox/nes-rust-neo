@@ -2,7 +2,7 @@
 //! and reads output views before the next mutating call.
 use std::cell::RefCell;
 
-use nes_core::{MAX_DISK_SAVE_BYTES, Media, Nes};
+use nes_core::{MAX_SNAPSHOT_BYTES, Media, Nes};
 
 #[derive(Default)]
 struct Emulator {
@@ -11,6 +11,7 @@ struct Emulator {
     media: Option<Media>,
     input: Vec<u8>,
     error: String,
+    output: Vec<u8>,
 }
 
 thread_local! {
@@ -20,7 +21,7 @@ thread_local! {
 #[unsafe(no_mangle)]
 pub extern "C" fn input_buffer(len: usize) -> *mut u8 {
     EMULATOR.with_borrow_mut(|emu| {
-        if len > MAX_DISK_SAVE_BYTES {
+        if len > MAX_SNAPSHOT_BYTES {
             return std::ptr::null_mut();
         }
         emu.input.resize(len, 0);
@@ -231,5 +232,117 @@ pub extern "C" fn select_disk(side: i32) -> bool {
                 usize::try_from(side).is_ok_and(|side| nes.insert_disk(side))
             }
         })
+    })
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn snapshot_limit() -> usize {
+    EMULATOR.with_borrow(|emu| emu.live.as_ref().map_or(0, Nes::snapshot_limit))
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn disk_save_limit() -> usize {
+    EMULATOR.with_borrow(|emu| emu.live.as_ref().map_or(0, Nes::disk_save_limit))
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn capture_snapshot() -> usize {
+    EMULATOR.with_borrow_mut(|emu| {
+        emu.output = emu.live.as_ref().map_or_else(Vec::new, Nes::snapshot);
+        emu.output.len()
+    })
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn output_ptr() -> *const u8 {
+    EMULATOR.with_borrow(|emu| emu.output.as_ptr())
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn clear_output() {
+    EMULATOR.with_borrow_mut(|emu| emu.output = Vec::new());
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn prepare_snapshot() -> bool {
+    EMULATOR.with_borrow_mut(|emu| {
+        emu.candidate = None;
+        let input = std::mem::take(&mut emu.input);
+        let Some(live) = &emu.live else {
+            return false;
+        };
+        match live.prepare_snapshot(&input) {
+            Ok(machine) => {
+                emu.candidate = Some(machine);
+                true
+            }
+            Err(error) => {
+                emu.error = error.to_string();
+                false
+            }
+        }
+    })
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn candidate_frame_ptr() -> *const u8 {
+    EMULATOR.with_borrow(|emu| {
+        emu.candidate
+            .as_ref()
+            .map_or(std::ptr::null(), |nes| nes.frame().as_ptr())
+    })
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn candidate_save_ptr() -> *const u8 {
+    EMULATOR.with_borrow(|emu| {
+        emu.candidate
+            .as_ref()
+            .and_then(Nes::save_bytes)
+            .map_or(std::ptr::null(), <[u8]>::as_ptr)
+    })
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn disk_requested_side() -> i32 {
+    EMULATOR.with_borrow(|emu| {
+        emu.live
+            .as_ref()
+            .and_then(Nes::requested_disk_side)
+            .map_or(-1, |side| side as i32)
+    })
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn encode_disk_save(candidate: bool) -> usize {
+    EMULATOR.with_borrow_mut(|emu| {
+        let machine = if candidate { &emu.candidate } else { &emu.live };
+        emu.output = machine
+            .as_ref()
+            .and_then(|nes| nes.export_disk_save(nes.save_bytes()?))
+            .unwrap_or_default();
+        emu.output.len()
+    })
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn restore_disk_save(candidate: bool) -> bool {
+    EMULATOR.with_borrow_mut(|emu| {
+        let input = std::mem::take(&mut emu.input);
+        let machine = if candidate {
+            &mut emu.candidate
+        } else {
+            &mut emu.live
+        };
+        let Some(nes) = machine else {
+            return false;
+        };
+        match nes.decode_disk_save(&input) {
+            Ok(tracks) => nes.restore_save(&tracks),
+            Err(error) => {
+                emu.error = error.to_string();
+                false
+            }
+        }
     })
 }

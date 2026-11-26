@@ -18,6 +18,13 @@ export async function loadCore() {
     return new Error(new TextDecoder().decode(bytes));
   }
 
+  function output(length) {
+    if (!length) throw error();
+    const bytes = new Uint8Array(api.memory.buffer, api.output_ptr(), length).slice();
+    api.clear_output();
+    return bytes;
+  }
+
   return {
     inspect(bytes) {
       stage(bytes);
@@ -37,21 +44,37 @@ export async function loadCore() {
     activate: api.activate_machine,
     discard: api.discard_candidate,
     diskSide: api.disk_side,
+    requestedDiskSide: api.disk_requested_side,
+    snapshotLimit: api.snapshot_limit,
+    diskSaveLimit: api.disk_save_limit,
+    snapshot() { return output(api.capture_snapshot()); },
+    prepareSnapshot(bytes) {
+      stage(bytes);
+      if (!api.prepare_snapshot()) throw error();
+    },
+    diskSave(candidate = false) { return output(api.encode_disk_save(candidate)); },
+    restoreDisk(bytes, candidate = false) {
+      stage(bytes);
+      if (!api.restore_disk_save(candidate)) throw error();
+    },
     selectDisk: api.select_disk,
     reset: api.reset,
     runFrame: api.run_frame,
     peekRam: api.debug_peek_ram,
 
-    draw(context, image) {
-      image.data.set(new Uint8Array(api.memory.buffer, api.frame_ptr(), width * height * 4));
+    draw(context, image, candidate = false) {
+      const pointer = candidate ? api.candidate_frame_ptr() : api.frame_ptr();
+      image.data.set(new Uint8Array(api.memory.buffer, pointer, width * height * 4));
       context.putImageData(image, 0, 0);
     },
     audio() {
       return new Float32Array(api.memory.buffer, api.audio_ptr(), api.audio_len());
     },
     saveRevision: api.save_revision,
-    saveBytes() {
-      return new Uint8Array(api.memory.buffer, api.save_ptr(), api.save_len()).slice();
+    saveBytes(candidate = false) {
+      const pointer = candidate ? api.candidate_save_ptr() : api.save_ptr();
+      const length = candidate ? api.candidate_save_len() : api.save_len();
+      return new Uint8Array(api.memory.buffer, pointer, length).slice();
     },
   };
 }

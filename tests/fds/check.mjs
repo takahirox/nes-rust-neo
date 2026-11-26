@@ -8,6 +8,8 @@ const root = new URL('../../', import.meta.url);
 const output = new URL('../generated/', import.meta.url);
 const timeout = 30_000;
 execFileSync(process.execPath, [fileURLToPath(new URL('build.mjs', import.meta.url))], { cwd: root, stdio: 'inherit', timeout });
+execFileSync('cargo', ['test', '--locked', '-p', 'nes-core', 'source_fixture_snapshot_continuation', '--', '--ignored'],
+  { cwd: root, stdio: 'inherit', timeout });
 execFileSync('cargo', ['build', '--locked', '--release', '-p', 'nes-runner'], { cwd: root, stdio: 'inherit', timeout });
 const metadata = JSON.parse(execFileSync('cargo', ['metadata', '--locked', '--no-deps', '--format-version', '1'], { cwd: root }));
 const runner = join(metadata.target_directory, 'release', process.platform === 'win32' ? 'nes-runner.exe' : 'nes-runner');

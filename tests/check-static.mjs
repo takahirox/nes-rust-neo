@@ -4,13 +4,13 @@ import { readdir, readFile } from 'node:fs/promises';
 
 const root = new URL('../', import.meta.url);
 const dist = new URL('web/dist/', root);
-const expected = ['audio.js', 'controls.js', 'disk-storage.js', 'index.html', 'main.js', 'nes_wasm.wasm', 'storage.js', 'style.css', 'wasm.js'];
+const expected = ['audio.js', 'controls.js', 'disk-storage.js', 'index.html', 'main.js', 'nes_wasm.wasm', 'save-storage.js', 'saves.js', 'storage.js', 'style.css', 'wasm.js'];
 const entries = await readdir(dist, { withFileTypes: true });
 assert.deepEqual(entries.map(entry => entry.name).sort(), expected);
 assert(entries.every(entry => entry.isFile()));
 
 const tracked = execFileSync('git', ['ls-files', '-z'], { cwd: root, encoding: 'utf8' }).split('\0');
-assert(!tracked.some(path => /(?:\.(nes|fds|unf|unif|chr|sav|qd|rom|bios|bin|fds-save)$)|^(tests\/generated|web\/dist)\//i.test(path)));
+assert(!tracked.some(path => /(?:\.(nes|fds|unf|unif|chr|sav|srm|qd|rom|bios|bin|nesstate|fds-save)$)|^(tests\/generated|web\/dist)\//i.test(path)));
 const wasm = await readFile(new URL('nes_wasm.wasm', dist));
 assert(WebAssembly.validate(wasm));
 const rustSources = tracked.filter(path => /^crates\/[^/]+\/src\/.*\.rs$/.test(path));

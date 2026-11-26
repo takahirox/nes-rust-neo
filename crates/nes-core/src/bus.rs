@@ -1,7 +1,9 @@
+use crate::SnapshotError;
 use crate::apu::Apu;
 use crate::board::Board;
 use crate::cpu::CpuBus;
 use crate::ppu::Ppu;
+use crate::snapshot::{Reader, Value, state_fields, valid};
 
 #[derive(Default)]
 pub(crate) struct Pad {
@@ -152,5 +154,37 @@ impl CpuBus for Bus {
     }
     fn irq(&self) -> bool {
         self.apu.irq() || self.board.irq()
+    }
+}
+
+state_fields!(Pad { buttons, shift });
+
+impl Bus {
+    pub fn write_state(&self, out: &mut Vec<u8>) {
+        out.extend_from_slice(&self.ram);
+        self.pads.encode(out);
+        self.cycle.encode(out);
+        self.open.encode(out);
+        self.strobe.encode(out);
+        self.ppu.write_state(out);
+        self.apu.write_state(out);
+        self.board.write_state(out);
+        // OAM DMA is drained synchronously before returning from an instruction.
+        debug_assert!(self.dma.is_none());
+    }
+
+    pub fn read_state(&mut self, input: &mut Reader<'_>) -> Result<(), SnapshotError> {
+        input.copy(&mut self.ram)?;
+        self.pads = input.value()?;
+        self.cycle = input.value()?;
+        self.open = input.value()?;
+        self.strobe = input.value()?;
+        // Leave ample headroom for emulation to advance. CPU and PPU clocks
+        // share an origin and every CPU tick advances exactly three PPU dots.
+        valid(self.cycle <= u64::MAX / 4)?;
+        let ppu_clock = self.cycle * 3;
+        self.ppu.read_state(input, ppu_clock)?;
+        self.apu.read_state(input, self.cycle)?;
+        self.board.read_state(input, self.cycle, ppu_clock)
     }
 }

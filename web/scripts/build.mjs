@@ -11,7 +11,7 @@ const metadata = JSON.parse(execFileSync('cargo', ['metadata', '--locked', '--no
 const dist = resolve(web, 'dist');
 await rm(dist, { recursive: true, force: true });
 await mkdir(dist);
-for (const name of ['index.html', 'style.css', 'main.js', 'audio.js', 'controls.js', 'storage.js', 'disk-storage.js', 'wasm.js']) {
+for (const name of ['index.html', 'style.css', 'main.js', 'audio.js', 'controls.js', 'storage.js', 'disk-storage.js', 'save-storage.js', 'saves.js', 'wasm.js']) {
   await copyFile(resolve(web, 'src', name), resolve(dist, name));
 }
 await copyFile(resolve(metadata.target_directory, 'wasm32-unknown-unknown/release/nes_wasm.wasm'), resolve(dist, 'nes_wasm.wasm'));
