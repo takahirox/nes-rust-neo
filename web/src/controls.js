@@ -29,7 +29,7 @@ export function controls(panel, enabled, gesture) {
   window.addEventListener('gamepaddisconnected', event => blockedPads.delete(event.gamepad.index));
   window.addEventListener('keydown', event => {
     if (!enabled() || event.ctrlKey || event.altKey || event.metaKey ||
-        event.target.closest?.('input, select, #help, #cartridge-picker') ||
+        event.target.closest?.('input, select, dialog, #help, #cartridge-picker') ||
         (event.code === 'Enter' && event.target.closest?.('button'))) return;
     if (keys.has(event.code)) {
       event.preventDefault();

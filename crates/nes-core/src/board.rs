@@ -1,3 +1,5 @@
+use crate::SnapshotError;
+use crate::snapshot::Reader;
 use crate::{Cartridge, Mirroring, fds::Fds};
 
 pub(crate) enum Board {
@@ -65,6 +67,41 @@ impl Board {
         match self {
             Self::Cartridge(cart) => cart.irq(),
             Self::Disk(fds) => fds.irq(),
+        }
+    }
+}
+
+impl Board {
+    pub fn snapshot_identity(&self) -> (u8, [u8; 32], [u8; 32]) {
+        match self {
+            Self::Cartridge(cart) => (0, cart.identity, [0; 32]),
+            Self::Disk(fds) => fds.snapshot_identity(),
+        }
+    }
+
+    pub fn snapshot_base(&self) -> Self {
+        match self {
+            Self::Cartridge(cart) => Self::Cartridge(cart.clone()),
+            Self::Disk(fds) => Self::Disk(Box::new(fds.snapshot_base())),
+        }
+    }
+
+    pub fn write_state(&self, out: &mut Vec<u8>) {
+        match self {
+            Self::Cartridge(cart) => cart.write_state(out),
+            Self::Disk(fds) => fds.write_state(out),
+        }
+    }
+
+    pub fn read_state(
+        &mut self,
+        input: &mut Reader<'_>,
+        cycle: u64,
+        ppu_clock: u64,
+    ) -> Result<(), SnapshotError> {
+        match self {
+            Self::Cartridge(cart) => cart.read_state(input, cycle, ppu_clock),
+            Self::Disk(fds) => fds.read_state(input),
         }
     }
 }

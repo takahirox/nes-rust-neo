@@ -1,3 +1,5 @@
+use crate::snapshot::state_fields;
+
 const CARRY: u8 = 1;
 const ZERO: u8 = 2;
 const INTERRUPT: u8 = 4;
@@ -28,6 +30,23 @@ pub struct CpuState {
 pub(crate) struct Cpu {
     state: CpuState,
     irq_masked: bool,
+}
+
+state_fields!(CpuState {
+    pc,
+    a,
+    x,
+    y,
+    sp,
+    status,
+    halted
+});
+state_fields!(Cpu { state, irq_masked });
+
+impl Cpu {
+    pub fn valid_state(&self) -> bool {
+        self.state.status & (UNUSED | BREAK) == UNUSED
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]

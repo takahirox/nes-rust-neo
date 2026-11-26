@@ -1,4 +1,7 @@
-use std::fmt;
+use std::{fmt, sync::Arc};
+
+use crate::SnapshotError;
+use crate::snapshot::{Reader, Value, hash, state_fields, valid};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RomError {
@@ -36,7 +39,7 @@ pub enum Mirroring {
     FourScreen,
 }
 
-#[derive(Default)]
+#[derive(Clone, Default)]
 struct Mmc3 {
     select: u8,
     banks: [u8; 8],
@@ -50,6 +53,7 @@ struct Mmc3 {
     low_since: u64,
 }
 
+#[derive(Clone)]
 enum Mapper {
     Nrom,
     Mmc1 {
@@ -64,11 +68,13 @@ enum Mapper {
     Mmc3(Mmc3),
 }
 
+#[derive(Clone)]
 pub struct Cartridge {
     mapper: Mapper,
     mapper_number: u8,
-    prg: Vec<u8>,
-    chr: Vec<u8>,
+    prg: Arc<[u8]>,
+    chr: Arc<[u8]>,
+    pub(crate) identity: [u8; 32],
     chr_ram: bool,
     ram: Box<[u8; 8192]>,
     mirroring: Mirroring,
@@ -134,11 +140,12 @@ impl Cartridge {
         Ok(Self {
             mapper: Self::initial_mapper(number),
             mapper_number: number,
-            prg: rom[prg_start..chr_start].to_vec(),
+            prg: Arc::from(&rom[prg_start..chr_start]),
+            identity: hash(rom),
             chr: if chr == 0 {
-                vec![0; 8192]
+                Arc::from(vec![0; 8192])
             } else {
-                rom[chr_start..end].to_vec()
+                Arc::from(&rom[chr_start..end])
             },
             chr_ram: chr == 0,
             ram,
@@ -387,7 +394,7 @@ impl Cartridge {
     pub(crate) fn chr_write(&mut self, address: u16, value: u8) {
         if self.chr_ram {
             let index = self.chr_index(address);
-            self.chr[index] = value;
+            Arc::make_mut(&mut self.chr)[index] = value;
         }
     }
 
@@ -414,5 +421,107 @@ impl Cartridge {
 
     pub(crate) fn irq(&self) -> bool {
         matches!(self.mapper, Mapper::Mmc3(ref m) if m.irq)
+    }
+}
+
+state_fields!(Mmc3 {
+    select,
+    banks,
+    ram,
+    latch,
+    counter,
+    reload,
+    enabled,
+    irq,
+    a12,
+    low_since
+});
+
+impl Cartridge {
+    pub(crate) fn write_state(&self, out: &mut Vec<u8>) {
+        out.extend_from_slice(self.ram.as_slice());
+        if self.chr_ram {
+            out.extend_from_slice(&self.chr);
+        }
+        self.save_revision.encode(out);
+        match &self.mapper {
+            Mapper::Nrom => {}
+            Mapper::Uxrom(bank) | Mapper::Cnrom(bank) => bank.encode(out),
+            Mapper::Mmc1 {
+                shift,
+                control,
+                chr,
+                prg,
+                last_write,
+            } => {
+                shift.encode(out);
+                control.encode(out);
+                chr.encode(out);
+                prg.encode(out);
+                last_write.encode(out);
+            }
+            Mapper::Mmc3(mmc) => {
+                (self.mirroring == Mirroring::Vertical).encode(out);
+                mmc.encode(out);
+            }
+        }
+    }
+
+    pub(crate) fn read_state(
+        &mut self,
+        input: &mut Reader<'_>,
+        cycle: u64,
+        ppu_clock: u64,
+    ) -> Result<(), SnapshotError> {
+        input.copy(self.ram.as_mut_slice())?;
+        if self.chr_ram {
+            let bytes = input.take(self.chr.len())?;
+            self.chr = Arc::from(bytes);
+        }
+        self.save_revision = input.value()?;
+        match &mut self.mapper {
+            Mapper::Nrom => Ok(()),
+            Mapper::Uxrom(bank) => {
+                *bank = input.value()?;
+                valid(*bank < 16)
+            }
+            Mapper::Cnrom(bank) => {
+                *bank = input.value()?;
+                valid(*bank < 4)
+            }
+            Mapper::Mmc1 {
+                shift,
+                control,
+                chr,
+                prg,
+                last_write,
+            } => {
+                *shift = input.value()?;
+                *control = input.value()?;
+                *chr = input.value()?;
+                *prg = input.value()?;
+                *last_write = input.value()?;
+                valid(
+                    (1..32).contains(shift)
+                        && [*control, chr[0], chr[1], *prg]
+                            .iter()
+                            .all(|&value| value < 32)
+                        && last_write.is_none_or(|when| when < cycle),
+                )
+            }
+            Mapper::Mmc3(mmc) => {
+                let vertical: bool = input.value()?;
+                self.mirroring = match self.initial_mirroring {
+                    Mirroring::FourScreen => {
+                        valid(!vertical)?;
+                        Mirroring::FourScreen
+                    }
+                    _ if vertical => Mirroring::Vertical,
+                    _ => Mirroring::Horizontal,
+                };
+                *mmc = input.value()?;
+                valid(mmc.low_since <= ppu_clock && (!mmc.irq || mmc.enabled))
+            }
+        }
     }
 }

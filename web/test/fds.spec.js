@@ -83,6 +83,12 @@ function frame(page) {
   return page.locator('canvas').evaluate(canvas => canvas.toDataURL());
 }
 
+async function saveState(page) {
+  await button(page, 'Save state').click();
+  await expect(page.locator('#status')).toHaveText('State saved.');
+  await expect(button(page, 'Save state')).toBeEnabled();
+}
+
 async function deliver(page, initialFrame) {
   const target = await peek(page, 0x18);
   const start = await peek(page, 0x11);
@@ -116,8 +122,8 @@ async function saveKey(name) {
   return 'fds-' + createHash('sha256').update(bytes[0] === 70 ? bytes.subarray(16) : bytes).digest('hex');
 }
 
-function diskStorage(page, key) {
-  return page.evaluate(key => new Promise((resolve, reject) => {
+async function diskStorage(page, key, initial = [0x11, 0x22, 0x33]) {
+  const record = await page.evaluate(key => new Promise((resolve, reject) => {
     const open = indexedDB.open('nes-rust-neo/fds', 1);
     open.onerror = () => reject(open.error);
     open.onsuccess = () => {
@@ -126,26 +132,52 @@ function diskStorage(page, key) {
       const get = tx.objectStore('data').get(key);
       tx.oncomplete = () => {
         db.close();
-        if (key === 'bios') resolve(get.result && Array.from(get.result));
-        else resolve(get.result && Array.from({ length: get.result.bytes.length / 98304 },
-          (_, side) => get.result.bytes[side * 98304 + 3560]));
+        const result = get.result;
+        resolve(key === 'bios' || !result ? result && Array.from(result) : {
+          version: result.version, bytes: Array.from(result.bytes),
+        });
       };
       tx.onabort = () => { db.close(); reject(tx.error); };
     };
   }), key);
+  if (!record || key === 'bios') return record;
+  expect(record.version).toBe(2);
+  return diskProgress(record.bytes, initial);
+}
+
+function diskProgress(bytes, initial = [0x11, 0x22, 0x33]) {
+  const pageSize = 256;
+  const pagesPerSide = 98304 / pageSize;
+  const pages = pagesPerSide * initial.length;
+  const flagsStart = 79;
+  let offset = flagsStart + pages / 8;
+  const values = initial.slice();
+  for (let page = 0; page < pages; page++) {
+    if (!(bytes[flagsStart + (page >> 3)] & (1 << (page & 7)))) continue;
+    if (page % pagesPerSide === Math.floor(3560 / pageSize)) {
+      values[Math.floor(page / pagesPerSide)] = bytes[offset + 3560 % pageSize];
+    }
+    offset += pageSize;
+  }
+  expect(offset + 32).toBe(bytes.length);
+  return values;
 }
 
 async function injectDiskFailures(page) {
   await page.addInitScript(() => {
-    for (const method of ['get', 'put']) {
+    for (const method of ['get', 'put', 'delete']) {
       const original = IDBObjectStore.prototype[method];
       IDBObjectStore.prototype[method] = function (...args) {
-        const key = args[method === 'get' ? 0 : 1];
+        const key = args[method === 'put' ? 1 : 0];
         if (this.name === 'data' && key?.startsWith?.('fds-') && method === 'get' && window.failDisk === 'corrupt') {
           return original.call(this, 'malformed-disk-save');
         }
-        if (this.name === 'data' && key?.startsWith?.('fds-') && window.failDisk === method) {
-          throw new DOMException('Injected disk storage failure', 'QuotaExceededError');
+        if (this.name === 'data' && key?.startsWith?.(window.failDiskPrefix ?? 'fds-') && window.failDisk === method) {
+          if (!(window.failDiskAfter > 0)) {
+            throw new DOMException('Injected disk storage failure', 'QuotaExceededError');
+          }
+          window.failDiskAfter--;
+          window.diskKeyWrittenBeforeFailure = key;
         }
         return original.apply(this, args);
       };
@@ -165,7 +197,7 @@ test('one picker validates media and manages a local BIOS without disrupting the
   const urls = [];
   page.on('request', request => urls.push([request.method(), request.url(), request.postData()]));
   await ready(page);
-  const assets = ['', 'index.html', 'style.css', 'main.js', 'controls.js', 'storage.js', 'disk-storage.js',
+  const assets = ['', 'index.html', 'style.css', 'main.js', 'controls.js', 'storage.js', 'disk-storage.js', 'save-storage.js', 'saves.js',
     'audio.js', 'wasm.js', 'nes_wasm.wasm'].map(path => new URL(path, page.url()).href);
   await expect(drive(page)).toBeHidden();
   const legacyBytes = await readFile(fixture(nes));
@@ -305,7 +337,7 @@ test('guest video, side progression and exact disk writes survive reset, removal
   await expect(page.locator('#disk-side option')).toHaveText(['Disk 1 — A']);
   expect(await peek(page, 0x12)).toBe(0x44);
   await deliver(page);
-  await expect.poll(async () => diskStorage(page, await saveKey(single))).toEqual([0x45]);
+  await expect.poll(async () => diskStorage(page, await saveKey(single), [0x44])).toEqual([0x45]);
   expect(await diskStorage(page, id)).toEqual([0x12, 0x23, 0x34]);
   expect(await readFile(fixture(multi))).toEqual(original);
 });
@@ -485,3 +517,300 @@ for (const layout of [
     }
   });
 }
+
+test('loading a state flushes matching unsaved disk changes before activating it', async ({ page }) => {
+  await injectDiskFailures(page);
+  const id = await saveKey(multi);
+  await ready(page);
+  await loadFile(page, multi);
+  await localBios(page);
+  await booted(page);
+  await page.evaluate(() => { window.failDisk = 'put'; });
+  await deliver(page);
+  expect(await peek(page, 0x12)).toBe(0x12);
+  await expect(page.locator('#warnings')).toHaveText(/Could not save disk changes/);
+  expect(await diskStorage(page, id)).toBeUndefined();
+  await saveState(page);
+
+  await page.evaluate(() => { delete window.failDisk; });
+  await button(page, 'Load state').click();
+  await expect(page.locator('#status')).toHaveText('State loaded.');
+  await button(page, 'Pause').click();
+  await page.reload();
+  await remembered(page, multi);
+  await booted(page);
+  expect(await peek(page, 0x12)).toBe(0x12);
+  expect(await diskStorage(page, id)).toEqual([0x12, 0x22, 0x33]);
+});
+
+test('a failed disk profile removal preserves the active machine and can be retried', async ({ page }) => {
+  await injectDiskFailures(page);
+  const id = await saveKey(multi);
+  await ready(page);
+  await loadFile(page, multi);
+  await localBios(page);
+  await booted(page);
+  const profiles = page.getByRole('dialog', { name: 'Save data' });
+  await page.locator('#save-data').click();
+  await button(profiles, 'New save').click();
+  await expect(page.locator('#active-save-name')).toHaveText('Save 2');
+  const key = await page.evaluate(id => `${id}:${JSON.parse(localStorage.getItem('nes-rust-neo/profiles-v1/' + id)).selected}`, id);
+  await changeSide(page, 2);
+  await deliver(page);
+  await button(page, 'Pause').click();
+  await expect.poll(() => diskStorage(page, key)).toEqual([0x11, 0x23, 0x33]);
+  const before = await frame(page);
+
+  await page.locator('#save-data').click();
+  await page.evaluate(() => { window.failDisk = 'delete'; });
+  page.once('dialog', dialog => dialog.accept());
+  await button(profiles, 'Remove Save 2').click();
+  await expect(page.locator('#save-data-message')).toHaveText('Injected disk storage failure');
+  await button(profiles, 'Close').click();
+  await expect(page.locator('#active-save-name')).toHaveText('Save 2');
+  await expect(button(page, 'Play')).toBeEnabled();
+  await expect(page.getByLabel('Disk side')).toHaveValue('1');
+  expect(await frame(page)).toBe(before);
+  expect(await peek(page, 0x12)).toBe(0x23);
+  expect(await diskStorage(page, key)).toEqual([0x11, 0x23, 0x33]);
+
+  await page.locator('#save-data').click();
+  await expect(button(profiles, 'Save 2')).toHaveAttribute('aria-current', 'true');
+  await page.evaluate(() => { delete window.failDisk; });
+  page.once('dialog', dialog => dialog.accept());
+  await button(profiles, 'Remove Save 2').click();
+  await expect(page.locator('#save-data-message')).toHaveText('Removed Save 2.');
+  await expect(button(profiles, 'Save 2')).toHaveCount(0);
+  await expect(page.locator('#active-save-name')).toHaveText('Save 1');
+  expect(await diskStorage(page, key)).toBeUndefined();
+});
+
+test('FDS states restore pending sides and isolate, migrate, and recover writable profiles', async ({ page }) => {
+  const network = [];
+  page.on('request', request => {
+    if (/^https?:/.test(request.url())) network.push([request.method(), request.url(), request.postData()]);
+  });
+  await injectDiskFailures(page);
+  const id = await saveKey(multi);
+  await ready(page);
+  await loadFile(page, multi);
+  await localBios(page);
+  await booted(page);
+  await deliver(page);
+  await button(page, 'Pause').click();
+  await expect.poll(() => diskStorage(page, id)).toEqual([0x12, 0x22, 0x33]);
+
+  // Seed the previous release's whole-track record under its original key.
+  await page.evaluate(key => new Promise((resolve, reject) => {
+    const core = window.emulator;
+    const bytes = new Uint8Array(core.memory.buffer, core.save_ptr(), core.save_len()).slice();
+    const open = indexedDB.open('nes-rust-neo/fds', 1);
+    open.onerror = () => reject(open.error);
+    open.onsuccess = () => {
+      const db = open.result;
+      const tx = db.transaction('data', 'readwrite');
+      tx.objectStore('data').put({ version: 1, bytes }, key);
+      tx.oncomplete = () => { db.close(); resolve(); };
+      tx.onabort = () => { db.close(); reject(tx.error); };
+    };
+  }), id);
+  await page.reload();
+  await remembered(page, multi);
+  await booted(page);
+  expect(await peek(page, 0x12)).toBe(0x12);
+  await expect(page.locator('#active-save-name')).toHaveText('Save 1');
+  expect(await diskStorage(page, id)).toEqual([0x12, 0x22, 0x33]);
+
+  const statePicker = page.getByRole('dialog', { name: 'Save states' });
+  const profilePicker = page.getByRole('dialog', { name: 'Save data' });
+  const rows = statePicker.locator('#state-history li');
+  const diskBytes = () => page.evaluate(() => {
+    const core = window.emulator;
+    const tracks = new Uint8Array(core.memory.buffer, core.save_ptr(), core.save_len());
+    return [0, 1, 2].map(side => tracks[side * 98304 + 3560]);
+  });
+  const openStates = () => page.locator('#choose-state').click();
+  async function openProfiles(name) {
+    await expect(page.locator('#active-save-name')).toHaveText(name);
+    await page.locator('#save-data').click();
+  }
+  async function exportFile(control, extension) {
+    const event = page.waitForEvent('download');
+    await control.click();
+    const download = await event;
+    expect(download.suggestedFilename()).toMatch(extension);
+    return {
+      name: download.suggestedFilename(), mimeType: 'application/octet-stream',
+      buffer: await readFile(await download.path()),
+    };
+  }
+
+  await button(page, 'Pause').click();
+  const originalFrame = await frame(page);
+  await saveState(page);
+  await openStates();
+  await expect(rows).toHaveCount(1);
+  const preview = rows.first().locator('img');
+  expect(await preview.evaluate(image => image.decode().then(() => image.naturalWidth))).toBe(256);
+  const initialTime = await rows.first().locator('time').getAttribute('datetime');
+  await button(statePicker, 'Close').click();
+  await saveState(page);
+  await openStates();
+  await expect(rows).toHaveCount(1);
+  await expect(rows.first().locator('time')).not.toHaveAttribute('datetime', initialTime);
+  const exportedState = await exportFile(rows.first().getByRole('button', { name: /^Export state/ }), /\.nesstate$/);
+  await button(statePicker, 'New state').click();
+  await expect(button(page, 'Load state')).toBeDisabled();
+  await page.getByLabel('Disk side').selectOption('1');
+  await expect(page.locator('#disk-status')).toHaveText('Changing side…');
+  await saveState(page);
+  await openStates();
+  await expect(rows).toHaveCount(2);
+  await rows.last().getByRole('button', { name: /^Select state/ }).click();
+  await expect(page.locator('#disk-status')).toHaveText('Changing side…');
+  await button(page, 'Load state').click();
+  await expect(page.locator('#disk-status')).toHaveText('Inserted');
+  await expect(page.getByLabel('Disk side')).toHaveValue('0');
+  await expect(button(page, 'Play')).toBeEnabled();
+  expect(await frame(page)).toBe(originalFrame);
+
+  await button(page, 'Play').click();
+  await deliver(page);
+  await changeSide(page, 2);
+  await button(page, 'Pause').click();
+  await expect.poll(() => diskStorage(page, id)).toEqual([0x13, 0x22, 0x33]);
+  // Deliver on side two with the UI paused so only the live disk changes.
+  await page.evaluate(() => {
+    const core = window.emulator;
+    const target = core.debug_peek_ram(0x18);
+    for (let i = 0; i < 240; i++) {
+      const position = core.debug_peek_ram(0x11);
+      if (Math.abs(target - position) <= 2) break;
+      core.run_frame(position < target ? 0x80 : 0x40, 0);
+    }
+    const deliveries = core.debug_peek_ram(0x13);
+    for (let i = 0; i < 600 && core.debug_peek_ram(0x13) === deliveries; i++) core.run_frame(1, 0);
+  });
+  expect(await diskBytes()).toEqual([0x13, 0x23, 0x33]);
+  const beforeFailedLoad = await frame(page);
+  await page.evaluate(id => {
+    window.failDisk = 'put';
+    window.failDiskPrefix = id + ':';
+    window.failDiskAfter = 1;
+  }, id);
+  await button(page, 'Load state').click();
+  await expect(page.locator('#status')).toHaveText(/State load stopped.*Injected disk storage failure/);
+  expect(await diskBytes()).toEqual([0x13, 0x23, 0x33]);
+  expect(await frame(page)).toBe(beforeFailedLoad);
+  await expect(page.getByLabel('Disk side')).toHaveValue('1');
+  await expect(button(page, 'Play')).toBeEnabled();
+  expect(await diskStorage(page, id)).toEqual([0x13, 0x22, 0x33]);
+  expect(await page.evaluate(id => localStorage.getItem('nes-rust-neo/profiles-v1/' + id), id)).toBeNull();
+  const partialRecoveryKey = await page.evaluate(() => window.diskKeyWrittenBeforeFailure);
+  expect(partialRecoveryKey).toContain(id + ':');
+  expect(await diskStorage(page, partialRecoveryKey)).toBeUndefined();
+
+  await page.evaluate(() => { delete window.failDisk; });
+  await button(page, 'Load state').click();
+  await expect(page.locator('#status')).toHaveText(/Previous progress.*recovery profiles/);
+  expect(await diskBytes()).toEqual([0x12, 0x22, 0x33]);
+  expect(await diskStorage(page, id)).toEqual([0x12, 0x22, 0x33]);
+  await openProfiles('Save 1');
+  const saveOneFile = await exportFile(button(profilePicker, 'Export current save data'), /\.fds-save$/);
+  await button(profilePicker, 'Close').click();
+  await openStates();
+  await expect(rows).toHaveCount(2);
+  await page.locator('#state-file').setInputFiles(exportedState);
+  await expect(page.locator('#state-message')).toHaveText(/State imported/);
+  await expect(rows).toHaveCount(3);
+  await rows.nth(1).getByRole('button', { name: /^Select state/ }).click();
+  await button(page, 'Load state').click();
+  await expect(page.locator('#disk-status')).toHaveText('Changing side…');
+  await expect(page.getByLabel('Disk side')).toHaveValue('1');
+  await expect(button(page, 'Play')).toBeEnabled();
+  expect(await peek(page, 0x10)).toBe(1);
+
+  await openProfiles('Save 1');
+  await expect(profilePicker.getByRole('button', { name: /^Recovery ·/ })).toHaveCount(2);
+  const lastSaved = profilePicker.getByRole('button', { name: /^Recovery · Last saved progress ·/ });
+  const lastSavedName = await lastSaved.textContent();
+  await lastSaved.click();
+  await expect(button(page, 'Play')).toBeEnabled();
+  expect(await diskBytes()).toEqual([0x13, 0x22, 0x33]);
+  await openProfiles(lastSavedName);
+  const recover = profilePicker.getByRole('button', { name: /^Recovery · Current progress ·/ });
+  const recoveryName = await recover.textContent();
+  await recover.click();
+  await expect(button(page, 'Play')).toBeEnabled();
+  expect(await diskBytes()).toEqual([0x13, 0x23, 0x33]);
+  await button(page, 'Reset').click();
+  await expect(button(page, 'Play')).toBeEnabled();
+  expect(await diskBytes()).toEqual([0x13, 0x23, 0x33]);
+  await openStates();
+  await expect(rows).toHaveCount(0);
+  await button(statePicker, 'Close').click();
+  await openProfiles(recoveryName);
+  await button(profilePicker, 'Duplicate current').click();
+  await openProfiles('Save 2');
+  const diskFile = await exportFile(button(profilePicker, 'Export current save data'), /\.fds-save$/);
+  expect(diskProgress(diskFile.buffer)).toEqual([0x13, 0x23, 0x33]);
+  await button(profilePicker, 'Close').click();
+  await button(page, 'Play').click();
+  await booted(page);
+  await button(page, 'Pause').click();
+  await openProfiles('Save 2');
+  await page.locator('#save-data-file').setInputFiles(saveOneFile);
+  await expect(page.locator('#save-data-message')).toHaveText(/Imported as Save 3/);
+  await expect(button(profilePicker, 'Save 2')).toHaveAttribute('aria-current', 'true');
+  await expect(page.locator('#active-save-name')).toHaveText('Save 2');
+  await expect(page.locator('#play')).toHaveText('Play');
+  expect(await peek(page, 0x10)).toBe(1);
+  expect(await diskBytes()).toEqual([0x13, 0x23, 0x33]);
+  await button(profilePicker, 'Save 3').click();
+  await expect(button(page, 'Play')).toBeEnabled();
+  expect(await peek(page, 0x10)).toBe(0);
+  expect(await diskBytes()).toEqual([0x12, 0x22, 0x33]);
+  await openProfiles('Save 3');
+  await button(profilePicker, 'New save').click();
+  await openProfiles('Save 4');
+  expect(await diskBytes()).toEqual([0x11, 0x22, 0x33]);
+  page.once('dialog', dialog => dialog.accept());
+  await button(profilePicker, 'Remove Save 4').click();
+  await expect(page.locator('#save-data-message')).toHaveText('Removed Save 4.');
+  await expect(page.locator('#active-save-name')).toHaveText('Save 1');
+  await button(profilePicker, 'Close').click();
+  await expect(button(page, 'Load state')).toBeEnabled();
+
+  const games = await picker(page);
+  await button(games, 'Remove ' + multi).click();
+  await expect(page.locator('#library-status')).toHaveText(/Removed/);
+  await page.keyboard.press('Escape');
+  await loadFile(page, raw);
+  await loaded(page, raw);
+  await booted(page);
+  expect(await diskBytes()).toEqual([0x12, 0x22, 0x33]);
+  await openStates();
+  await expect(rows).toHaveCount(3);
+  await button(statePicker, 'Close').click();
+  await page.reload();
+  await remembered(page, raw);
+  await booted(page);
+  expect(await peek(page, 0x12)).toBe(0x12);
+  await openStates();
+  await expect(rows).toHaveCount(3);
+  await rows.last().getByRole('button', { name: /^Select state/ }).click();
+  await button(page, 'Load state').click();
+  await expect(page.locator('#status')).toHaveText('State loaded.');
+  await expect(button(page, 'Pause')).toBeEnabled();
+  await openStates();
+  page.once('dialog', dialog => dialog.accept());
+  await rows.first().getByRole('button', { name: /^Remove state/ }).click();
+  await expect(rows).toHaveCount(2);
+  await expect(rows.last().locator('[aria-current=true]')).toBeVisible();
+  page.once('dialog', dialog => dialog.accept());
+  await rows.last().getByRole('button', { name: /^Remove state/ }).click();
+  await expect(rows).toHaveCount(1);
+  await expect(button(statePicker, 'New state')).toHaveAttribute('aria-current', 'true');
+  expect(network.every(([method, url, body]) => method === 'GET' && body === null &&
+    /^\/nes-rust-neo\/(?:[\w-]+\.(?:js|css|wasm))?$/.test(new URL(url).pathname))).toBe(true);
+});

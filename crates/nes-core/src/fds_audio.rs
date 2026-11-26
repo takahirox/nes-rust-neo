@@ -1,3 +1,5 @@
+use crate::snapshot::state_fields;
+
 #[derive(Default)]
 struct Envelope {
     control: u8,
@@ -180,6 +182,44 @@ impl FdsAudio {
             }
             _ => {}
         }
+    }
+}
+
+state_fields!(Envelope {
+    control,
+    gain,
+    elapsed
+});
+state_fields!(FdsAudio {
+    wave,
+    mod_table,
+    wave_phase,
+    mod_phase,
+    bias,
+    pitch,
+    mod_pitch,
+    volume,
+    modulation,
+    envelope_speed,
+    wave_control,
+    mod_halted,
+    level_control,
+    output
+});
+
+impl FdsAudio {
+    pub fn valid_state(&self) -> bool {
+        self.wave.iter().all(|&value| value < 64)
+            && self.mod_table.iter().all(|&value| value < 8)
+            && self.wave_phase <= Self::PHASE_MASK
+            && self.mod_phase <= Self::PHASE_MASK
+            && (-64..64).contains(&self.bias)
+            && self.pitch <= 0xfff
+            && self.mod_pitch <= 0xfff
+            && [&self.volume, &self.modulation]
+                .iter()
+                .all(|env| env.gain <= 63 && env.elapsed < 8 * 255 * 64)
+            && (0.0..=0.22).contains(&self.output)
     }
 }
 

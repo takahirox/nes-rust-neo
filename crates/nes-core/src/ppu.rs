@@ -1,3 +1,5 @@
+use crate::SnapshotError;
+use crate::snapshot::{Reader, Value, state_fields, valid};
 use crate::{HEIGHT, WIDTH};
 use crate::{Mirroring, board::Board};
 
@@ -507,5 +509,104 @@ impl Ppu {
         } else {
             self.dot += 1;
         }
+    }
+}
+
+state_fields!(Sprite {
+    x,
+    attr,
+    index,
+    address,
+    lo,
+    hi
+});
+
+impl Ppu {
+    pub fn write_state(&self, out: &mut Vec<u8>) {
+        out.extend_from_slice(self.vram.as_slice());
+        out.extend_from_slice(&self.palette);
+        out.extend_from_slice(&self.oam);
+        self.oam_address.encode(out);
+        self.ctrl.encode(out);
+        self.mask.encode(out);
+        self.status.encode(out);
+        self.latch.encode(out);
+        self.buffer.encode(out);
+        self.v.encode(out);
+        self.t.encode(out);
+        self.fine_x.encode(out);
+        self.second_write.encode(out);
+        self.scanline.encode(out);
+        self.dot.encode(out);
+        self.clock.encode(out);
+        self.odd.encode(out);
+        self.frames.encode(out);
+        self.nmi_line.encode(out);
+        self.nmi_pending.encode(out);
+        self.suppress_vblank.encode(out);
+        self.tile.encode(out);
+        self.attribute.encode(out);
+        self.pattern_lo.encode(out);
+        self.pattern_hi.encode(out);
+        self.bg.encode(out);
+        self.sprites.encode(out);
+        self.next_sprites.encode(out);
+        self.sprite_count.encode(out);
+        self.next_count.encode(out);
+        out.extend_from_slice(&self.frame);
+    }
+
+    pub fn read_state(&mut self, input: &mut Reader<'_>, clock: u64) -> Result<(), SnapshotError> {
+        input.copy(self.vram.as_mut_slice())?;
+        input.copy(&mut self.palette)?;
+        input.copy(&mut self.oam)?;
+        self.oam_address = input.value()?;
+        self.ctrl = input.value()?;
+        self.mask = input.value()?;
+        self.status = input.value()?;
+        self.latch = input.value()?;
+        self.buffer = input.value()?;
+        self.v = input.value()?;
+        self.t = input.value()?;
+        self.fine_x = input.value()?;
+        self.second_write = input.value()?;
+        self.scanline = input.value()?;
+        self.dot = input.value()?;
+        self.clock = input.value()?;
+        self.odd = input.value()?;
+        self.frames = input.value()?;
+        self.nmi_line = input.value()?;
+        self.nmi_pending = input.value()?;
+        self.suppress_vblank = input.value()?;
+        self.tile = input.value()?;
+        self.attribute = input.value()?;
+        self.pattern_lo = input.value()?;
+        self.pattern_hi = input.value()?;
+        self.bg = input.value()?;
+        self.sprites = input.value()?;
+        self.next_sprites = input.value()?;
+        self.sprite_count = input.value()?;
+        self.next_count = input.value()?;
+        input.copy(&mut self.frame)?;
+        valid(
+            self.clock == clock
+                && self.frames <= clock
+                && self.scanline <= 261
+                && self.dot <= 340
+                && self.nmi_line == (self.ctrl & self.status & 0x80 != 0)
+                && self.status & 0x1f == 0
+                && self.v <= 0x7fff
+                && self.t <= 0x7fff
+                && self.fine_x < 8
+                && self.attribute < 4
+                && self.palette.iter().all(|&value| value < 64)
+                && self.sprite_count <= 8
+                && self.next_count <= 8
+                && self
+                    .sprites
+                    .iter()
+                    .chain(&self.next_sprites)
+                    .all(|sprite| sprite.address <= 0x1ff7 && sprite.index < 64),
+        )
     }
 }

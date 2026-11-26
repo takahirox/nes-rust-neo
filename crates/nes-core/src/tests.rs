@@ -505,3 +505,222 @@ fn dmc_fetch_extends_oam_dma_without_losing_bytes() {
         assert_eq!(nes.bus.read(0x2004), if i & 3 == 2 { i & 0xe3 } else { i });
     }
 }
+
+fn snapshot_cart(mapper: u8, banks: u8, battery: bool) -> Vec<u8> {
+    let chr = if mapper == 3 { 4 } else { 0 };
+    let mut image = rom(mapper, banks, chr, u8::from(battery) * 2);
+    // Sample controller shift register, change palette and RAM, and loop.
+    let code = [
+        0xa9, 1, 0x8d, 0x16, 0x40, 0x4a, 0x8d, 0x16, 0x40, 0xad, 0x16, 0x40, 0x29, 1, 0x85, 1,
+        0x8d, 1, 0x60, 0xa9, 0x3f, 0x8d, 6, 0x20, 0xa9, 0, 0x8d, 6, 0x20, 0xa5, 1, 0x69, 0x15,
+        0x8d, 7, 0x20, 0x4c, 0, 0xe1,
+    ];
+    let prg_end = 16 + usize::from(banks) * 16384;
+    for bank in 0..usize::from(banks) {
+        image[16 + bank * 16384] = 0x90 + bank as u8;
+    }
+    image[prg_end - 0x1f00..][..code.len()].copy_from_slice(&code);
+    image[prg_end - 6..prg_end].copy_from_slice(&[0, 0xe1, 0, 0xe1, 0, 0xe1]);
+    if banks == 32 {
+        // Reset reads the vector in the lower half before the test switches banks.
+        let lower_end = 16 + 16 * 16384;
+        image[lower_end - 4..lower_end - 2].copy_from_slice(&[0, 0xe1]);
+    }
+    if mapper == 3 {
+        image[16] = 0xff;
+        for bank in 0..4 {
+            image[prg_end + bank * 8192] = 0xb0 | bank as u8;
+        }
+    }
+    image
+}
+
+#[test]
+fn snapshot_continuation_for_every_cartridge_mapper() {
+    use crate::snapshot::hash;
+
+    for (mapper, banks, battery) in [
+        (0, 1, false),
+        (0, 1, true),
+        (1, 4, true),
+        (1, 32, true),
+        (2, 4, false),
+        (3, 1, false),
+        (4, 4, true),
+    ] {
+        let image = snapshot_cart(mapper, banks, battery);
+        let mut nes = Nes::from_ines(&image).unwrap();
+        nes.bus.write(0x6000, 0x81);
+        nes.bus.board.chr_write(0, 0xa5);
+        match mapper {
+            1 => {
+                if banks == 32 {
+                    // SUROM uses CHR bank 0 bit 4 to select the upper PRG half.
+                    for (addr, value) in [(0xa000, 0x10), (0xe000, 3)] {
+                        for shift in 0..5 {
+                            nes.bus.write(addr, (value >> shift) & 1);
+                            nes.bus.read(0);
+                        }
+                    }
+                }
+                for _ in 0..4 {
+                    nes.bus.write(0x8000, 1);
+                    nes.bus.read(0);
+                }
+            }
+            2 => nes.bus.write(0x8000, 1),
+            3 => nes.bus.write(0x8000, 2),
+            4 => {
+                for (addr, value) in [
+                    (0x8000, 0xc6),
+                    (0x8001, 2),
+                    (0xa000, 0),
+                    (0xc000, 1),
+                    (0xc001, 1),
+                    (0xe001, 0),
+                ] {
+                    nes.bus.write(addr, value);
+                }
+                let clock = nes.cpu_cycles() * 3;
+                nes.bus.board.ppu_address(0, clock - 9);
+                nes.bus.board.ppu_address(0x1000, clock);
+                nes.bus.board.ppu_address(0, clock);
+            }
+            _ => {}
+        }
+        for (addr, value) in [
+            (0x4015, 0xff),
+            (0x4000, 0xbf),
+            (0x4002, 0x99),
+            (0x4003, 0xff),
+            (0x4008, 0x92),
+            (0x400a, 0x31),
+            (0x400b, 0x7f),
+            (0x400c, 0x1b),
+            (0x400e, 0x84),
+            (0x400f, 0xff),
+            (0x4010, 0x4f),
+            (0x4011, 0x21),
+            (0x4012, 0x20),
+            (0x4013, 2),
+            (0x4015, 0xff),
+            (0x2001, 0x18),
+            (0x4014, 0),
+        ] {
+            nes.bus.write(addr, value);
+        }
+        nes.step_instruction(); // Completes OAM DMA before the capture.
+        assert!(nes.run_frame());
+        if mapper == 1 {
+            nes.bus.write(0x8000, 1); // Publish the serial control register.
+            nes.bus.read(0);
+            for _ in 0..4 {
+                nes.bus.write(0xe000, 0);
+                nes.bus.read(0);
+            }
+        }
+        nes.set_controller(0, 0xd1);
+        nes.bus.write(0x4016, 1);
+        nes.bus.write(0x4016, 0);
+        assert_eq!(nes.bus.read(0x4016) & 1, 1);
+        nes.bus.write(0x4017, 0x80); // Pending APU frame-counter reset.
+        let capture = nes.snapshot();
+        assert!(capture.len() < 300 * 1024);
+        let mut restored = Nes::from_ines(&image).unwrap();
+        restored.restore_snapshot(&capture).unwrap();
+        assert!(restored.audio().is_empty());
+        assert_eq!(restored.snapshot(), capture);
+        assert_eq!(nes.bus.read(0x4016), restored.bus.read(0x4016));
+        if mapper == 3 {
+            assert_eq!(restored.bus.board.chr_read(0), 0xb2);
+        } else {
+            assert_eq!(restored.bus.board.chr_read(0), 0xa5);
+        }
+        match mapper {
+            1 => {
+                assert_eq!(restored.bus.board.mirroring(), Mirroring::Horizontal);
+                if banks == 32 {
+                    assert_eq!(restored.bus.board.cpu_read(0x8000, 0), 0xa3);
+                    assert_eq!(restored.bus.board.cpu_read(0xc000, 0), 0xaf);
+                }
+                for machine in [&mut nes, &mut restored] {
+                    machine.bus.write(0xe000, 1);
+                    assert_eq!(machine.bus.board.cpu_read(0x6000, 0x55), 0x55);
+                }
+            }
+            2 => assert_eq!(restored.bus.board.cpu_read(0x8000, 0), 0x91),
+            4 => {
+                assert_eq!(restored.bus.board.mirroring(), Mirroring::Vertical);
+                assert_eq!(restored.bus.board.cpu_read(0x8000, 0), 0x93);
+                assert_eq!(restored.bus.board.cpu_read(0xc000, 0), 0x91);
+            }
+            _ => {}
+        }
+        let mut frame_hashes = Vec::new();
+        for input in [button::A, 0, button::A] {
+            for machine in [&mut nes, &mut restored] {
+                machine.set_controller(0, input);
+                assert!(machine.run_frame(), "mapper {mapper}");
+            }
+            let frame_hash = hash(nes.frame());
+            frame_hashes.push(frame_hash);
+            assert_eq!(hash(restored.frame()), frame_hash, "mapper {mapper}");
+            assert_eq!(nes.cpu_state(), restored.cpu_state());
+            assert_eq!(nes.peek_ram(0x6001), restored.peek_ram(0x6001));
+            assert_eq!(nes.peek_ram(1), restored.peek_ram(1));
+            assert!(!nes.audio().is_empty());
+            assert!(nes.audio().iter().any(|sample| sample.abs() > 0.001));
+            assert_eq!(nes.audio(), restored.audio());
+            assert_eq!(nes.snapshot(), restored.snapshot());
+        }
+        assert_ne!(frame_hashes[1], frame_hashes[2]);
+    }
+}
+
+#[test]
+fn snapshot_rejection_preserves_live_machine() {
+    use crate::snapshot::hash;
+    let image = snapshot_cart(0, 1, true);
+    let mut other_image = image.clone();
+    other_image[16] ^= 1;
+    let other = Nes::from_ines(&other_image).unwrap();
+    let mut nes = Nes::from_ines(&image).unwrap();
+    assert!(nes.run_frame());
+    let before = nes.snapshot();
+
+    assert_eq!(
+        nes.restore_snapshot(&other.snapshot()),
+        Err(SnapshotError::Media)
+    );
+    for (offset, expected) in [
+        (0, SnapshotError::Format),
+        (8, SnapshotError::Version),
+        (10, SnapshotError::Media),
+        (75, SnapshotError::Format),
+        (200, SnapshotError::Integrity),
+    ] {
+        let mut changed = before.clone();
+        changed[offset] ^= 0x80;
+        assert_eq!(nes.restore_snapshot(&changed), Err(expected));
+    }
+    for length in [0, 79, 120, before.len() - 1] {
+        assert_eq!(
+            nes.restore_snapshot(&before[..length]),
+            Err(SnapshotError::Format)
+        );
+    }
+    // A matching checksum still cannot admit an impossible CPU or PPU state.
+    let end = before.len() - 32;
+    for (offset, value) in [(85, 0), (86, 2), (6544, 0xff)] {
+        let mut changed = before.clone();
+        changed[offset] = value;
+        let digest = hash(&changed[..end]);
+        changed[end..].copy_from_slice(&digest);
+        assert_eq!(
+            nes.restore_snapshot(&changed),
+            Err(SnapshotError::State),
+            "offset {offset}"
+        );
+    }
+    assert_eq!(nes.snapshot(), before);
+}

@@ -12,11 +12,16 @@ function openStorage() {
 function access(database, mode, operation) {
   return new Promise((resolve, reject) => {
     const transaction = database.transaction('data', mode, { durability: 'strict' });
-    const request = operation(transaction.objectStore('data'));
-    transaction.oncomplete = () => resolve(request.result);
     transaction.onabort = () => reject(transaction.error ?? new Error('Disk storage transaction aborted.'));
-    // A navigation can suspend request callbacks before IndexedDB auto-commits.
-    if (mode === 'readwrite') transaction.commit?.();
+    try {
+      const request = operation(transaction.objectStore('data'));
+      transaction.oncomplete = () => resolve(request.result);
+      // Queue the write even if navigation suspends callbacks.
+      if (mode === 'readwrite') transaction.commit?.();
+    } catch (error) {
+      transaction.abort();
+      reject(error);
+    }
   });
 }
 
@@ -35,24 +40,14 @@ export const writeBios = bytes => accessBios('readwrite', store => store.put(byt
 export const forgetBios = () => accessBios('readwrite', store => store.delete('bios'));
 
 export class DiskSave {
-  static async open(id, size, core) {
+  static async open(id) {
     if (!navigator.locks) throw new Error('Disk saves require Web Locks in a secure browser context.');
-    let release;
-    let db;
+    const release = await holdLock('nes-rust-neo/fds/' + id);
+    if (!release) throw new Error('Close the other tab or open another game there, then retry.');
     try {
-      release = await holdLock('nes-rust-neo/fds/' + id);
-      if (!release) throw new Error('Close the other tab or open another game there, then retry.');
-      db = await openStorage();
-      const record = await access(db, 'readonly', store => store.get(id));
-      if (record !== undefined &&
-          (record.version !== 1 || !(record.bytes instanceof Uint8Array) ||
-           record.bytes.byteLength !== size || !core.restore(record.bytes, true))) {
-        throw new Error('The stored disk data is invalid.');
-      }
-      return new DiskSave(db, release, id);
+      return new DiskSave(await openStorage(), release, id);
     } catch (error) {
-      db?.close();
-      await release?.();
+      await release();
       throw error;
     }
   }
@@ -64,18 +59,64 @@ export class DiskSave {
     this.revision = 0;
   }
 
+  async #readRecord(key) {
+    const record = await access(this.db, 'readonly', store => store.get(key));
+    if (record !== undefined && !(record?.bytes instanceof Uint8Array)) {
+      throw new Error('The stored disk data is invalid.');
+    }
+    return record;
+  }
+
+  async readProfile(key) {
+    await this.writing?.promise;
+    const record = await this.#readRecord(key);
+    if (record === undefined) return;
+    if (record.version !== 2) throw new Error('The stored disk data is invalid.');
+    return record.bytes;
+  }
+
+  async load(key, core) {
+    const record = await this.#readRecord(key);
+    if (record === undefined) return;
+    // Save 1 adopts the old key. Replace the legacy record only after validation.
+    if (record.version === 1 && key === this.id && core.restore(record.bytes, true)) {
+      await this.write(key, core.diskSave(true));
+      return;
+    }
+    if (record.version === 2) {
+      try {
+        core.restoreDisk(record.bytes, true);
+        return;
+      } catch (error) {
+        throw new Error('The stored disk data is invalid. ' + error.message);
+      }
+    }
+    throw new Error('The stored disk data is invalid.');
+  }
+
+  write(key, bytes) {
+    return access(this.db, 'readwrite', store => store.put({ version: 2, bytes }, key));
+  }
+
+  remove(key) {
+    return access(this.db, 'readwrite', store => store.delete(key));
+  }
+
+  track(key, revision) {
+    this.key = key;
+    this.revision = revision;
+    this.failed = false;
+  }
+
   dirty(core) {
     return this.revision !== core.saveRevision();
   }
 
-  // Queue each newer snapshot immediately so IndexedDB can commit it in order
-  // even if the document navigates before the previous completion callback.
   flush(core) {
     const revision = core.saveRevision();
     if (this.writing?.revision === revision) return this.writing.promise;
     if (this.revision === revision) return Promise.resolve(true);
-    const bytes = core.saveBytes();
-    const promise = access(this.db, 'readwrite', store => store.put({ version: 1, bytes }, this.id))
+    const promise = this.write(this.key, core.diskSave())
       .then(() => true, () => false)
       .then(saved => {
         if (this.writing?.promise === promise) {

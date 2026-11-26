@@ -306,6 +306,42 @@ export class BatterySaves {
     }
   }
 
+  async replace(session, bytes) {
+    await session.writing;
+    const key = savePrefix + session.id;
+    const raw = encode(bytes);
+    await navigator.locks.request(key, () => {
+      if (session.pending || localStorage.getItem(key) !== session.base) {
+        throw new Error('The battery save changed. Reopen the game before restoring this state.');
+      }
+      localStorage.setItem(key, raw);
+      session.base = raw;
+    });
+  }
+
+  async readProfile(session) {
+    await session.writing;
+    return decode(localStorage.getItem(savePrefix + session.id), session.size);
+  }
+
+  async writeProfile(id, bytes) {
+    const key = savePrefix + id;
+    await navigator.locks.request(key, () => localStorage.setItem(key, encode(bytes)));
+  }
+
+  async removeProfile(id) {
+    const key = savePrefix + id;
+    await navigator.locks.request(key, () => withAbandonedDrafts(id, drafts => {
+      const session = this.#sessions.get(id);
+      localStorage.removeItem(key);
+      for (const draft of drafts) localStorage.removeItem(draft.key);
+      sessionStorage.removeItem(draftPrefix + id);
+      if (session?.draftKey) localStorage.removeItem(session.draftKey);
+      session?.releaseDraft?.();
+      this.#sessions.delete(id);
+    }));
+  }
+
   async retry(active, core) {
     let restored = false;
     for (const session of this.#sessions.values()) {

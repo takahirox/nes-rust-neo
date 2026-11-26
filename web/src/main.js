@@ -2,6 +2,8 @@ import { loadCore } from './wasm.js';
 import { biosSize, DiskSave, forgetBios, readBios, writeBios } from './disk-storage.js';
 import { Sound } from './audio.js';
 import { controls } from './controls.js';
+import { createSaveControls } from './saves.js';
+import { addProfile, hasStates, nativeKey, readProfiles, readState, writeProfiles } from './save-storage.js';
 import {
   BatterySaves, identify, listGames, preferencesKey, remember, remembered, removeGame,
 } from './storage.js';
@@ -36,12 +38,16 @@ let biosRequest;
 let biosRemembered = false;
 let running = false;
 let busy = false;
+let restoringState = false;
 let previous;
 let budget = 0;
 let lastSave = 0;
+let noticeTimer;
 
-function notice(message) {
+function notice(message, duration) {
+  clearTimeout(noticeTimer);
   get('status').textContent = message;
+  if (duration) noticeTimer = setTimeout(() => notice(''), duration);
 }
 
 function warn(category, message) {
@@ -77,6 +83,9 @@ function enabled() {
   return Boolean(active && running && !busy && !document.hidden);
 }
 const pads = controls(document.querySelector('.touch'), enabled, unlockAudio);
+const saveControls = createSaveControls({
+  current: () => ({ active, busy, core }), operate, notice, restoreState, changeProfile, importProfile, removeProfile,
+});
 
 function syncUI() {
   play.textContent = running ? 'Pause' : 'Play';
@@ -90,6 +99,7 @@ function syncUI() {
   biosButton.disabled = get('forget-bios').disabled = get('cancel-bios').disabled = busy;
   for (const button of library.querySelectorAll('button')) button.disabled = busy;
   pads.setEnabled(enabled());
+  saveControls.sync();
 }
 
 async function flushDisk(force = false) {
@@ -214,16 +224,17 @@ function clearTransient() {
   budget = 0;
 }
 
-async function operate(operation) {
+async function operate(operation, { message, preserveInput = false } = {}) {
   if (busy || !core) return;
   busy = true;
   get('library-status').textContent = '';
-  clearTransient();
+  if (!preserveInput) clearTransient();
   syncUI();
   try {
     await operation();
   } catch (error) {
-    if (gamePicker.matches(':popover-open')) get('library-status').textContent = error.message;
+    if (message) message.textContent = error.message;
+    else if (gamePicker.matches(':popover-open')) get('library-status').textContent = error.message;
     else notice(error.message);
   } finally {
     busy = false;
@@ -234,7 +245,7 @@ async function operate(operation) {
       }
     } else if (pendingGame?.conflict) {
       get('save-versions').querySelector('button').focus({ preventScroll: true });
-    } else if (active && running && !document.hidden && !help.open) {
+    } else if (active && running && !document.hidden && !help.open && !saveControls.dialogOpen()) {
       canvas.focus({ preventScroll: true });
     }
   }
@@ -264,7 +275,8 @@ function showSaveChoices(record, rememberImport, conflict) {
 
 function showDiskState() {
   if (!active?.diskSave) return;
-  const requested = active.requestedSide;
+  const side = core.requestedDiskSide();
+  const requested = side < 0 ? null : side;
   const inserted = core.diskSide();
   const action = requested === null ? 'Insert' : 'Eject';
   const status = requested === null ? 'Drive empty' : inserted === requested ? 'Inserted' : 'Changing side…';
@@ -274,16 +286,15 @@ function showDiskState() {
 
 function selectDisk(side) {
   if (busy || !active?.diskSave || !core.selectDisk(side ?? -1)) return;
-  active.requestedSide = side;
   showDiskState();
   if (enabled()) canvas.focus({ preventScroll: true });
   flushDisk(true);
 }
 
 diskSide.onchange = () => {
-  if (active?.diskSave && active.requestedSide !== null) selectDisk(Number(diskSide.value));
+  if (active?.diskSave && core.requestedDiskSide() >= 0) selectDisk(Number(diskSide.value));
 };
-diskToggle.onclick = () => selectDisk(active.requestedSide === null ? Number(diskSide.value) : null);
+diskToggle.onclick = () => selectDisk(core.requestedDiskSide() < 0 ? Number(diskSide.value) : null);
 
 function syncBios() {
   get('bios-required').hidden = get('cancel-bios').hidden = !biosRequest;
@@ -341,23 +352,25 @@ async function insert(record, rememberImport = false, selection, suppliedBios) {
   }
   let save;
   let diskSave;
+  let profile;
   try {
-    if (sides) {
-      diskSave = previousDisk?.id === id ? previousDisk : await DiskSave.open(id, size, core);
-      if (diskSave === previousDisk && !core.restore(core.saveBytes(), true)) {
-        throw new Error('The core rejected the current disk data.');
-      }
-    } else {
-      save = await saves.open(id, name, size, core, selection);
+    if (size) {
+      // Take the FDS game-wide lock before reading the selected profile.
+      if (sides) diskSave = previousDisk?.id === id ? previousDisk : await DiskSave.open(id);
+      const catalog = readProfiles(id);
+      profile = catalog.profiles.find(item => item.id === catalog.selected);
+      const key = nativeKey(id, profile.id);
+      if (sides) await diskSave.load(key, core);
+      else save = await saves.open(key, name, size, core, selection);
     }
   } catch (error) {
     core.discard();
+    if (diskSave && diskSave !== previousDisk) await diskSave.close();
     pendingGame = { record, rememberImport };
     showSaveChoices();
     gamePicker.hidePopover();
-    const detail = sides ? ` ${error.message}` : '';
     const kind = sides ? 'disk progress' : 'battery save';
-    warn('restore', `Could not restore the ${kind} for ${name}. Existing data is protected.${detail}`);
+    warn('restore', `Could not restore the ${kind} for ${name}. Existing data is protected. ${error.message}`);
     return;
   }
   if (save?.conflict) {
@@ -371,11 +384,12 @@ async function insert(record, rememberImport = false, selection, suppliedBios) {
   }
   if (previousDisk && previousDisk !== diskSave) await previousDisk.close();
   core.activate();
-  if (diskSave) diskSave.revision = core.saveRevision();
+  if (diskSave) diskSave.track(nativeKey(id, profile.id), core.saveRevision());
   if (save) save.revision = core.saveRevision();
   pendingGame = undefined;
   showSaveChoices();
-  active = { name, save, diskSave, requestedSide: sides ? 0 : null };
+  active = { id, name, size, sides, bios, record, profile, save, diskSave };
+  core.draw(context, image);
   get('disk-controls').hidden = !sides;
   diskSide.replaceChildren(...Array.from({ length: sides }, (_, side) =>
     new Option(`Disk ${Math.floor(side / 2) + 1} — ${side % 2 ? 'B' : 'A'}`, String(side))));
@@ -396,6 +410,221 @@ async function insert(record, rememberImport = false, selection, suppliedBios) {
     } catch {
       warn('library', 'This game could not be remembered. It can still be played.');
     }
+  }
+}
+
+async function flushRequired() {
+  await flushSave();
+  if (active.diskSave?.dirty(core) || active.save?.pending) {
+    throw new Error('Save the current progress before continuing. Use Retry save storage and try again.');
+  }
+}
+
+function nativeBytes(candidate = false) {
+  return active.diskSave ? core.diskSave(candidate) : core.saveBytes(candidate);
+}
+
+function writeNative(profile, bytes) {
+  const key = nativeKey(active.id, profile.id);
+  return active.diskSave ? active.diskSave.write(key, bytes) : saves.writeProfile(key, bytes);
+}
+
+function removeNative(profile) {
+  const key = nativeKey(active.id, profile.id);
+  return active.diskSave ? active.diskSave.remove(key) : saves.removeProfile(key);
+}
+
+async function persistNewProfile(catalog, profile, bytes, select = false) {
+  await writeNative(profile, bytes);
+  try {
+    const save = select && !active.diskSave
+      ? await saves.open(nativeKey(active.id, profile.id), active.name, active.size, core)
+      : undefined;
+    if (select) catalog.selected = profile.id;
+    writeProfiles(active.id, catalog);
+    return save;
+  } catch (error) {
+    // The new key is still private to this operation.
+    await removeNative(profile).catch(() => {});
+    throw error;
+  }
+}
+
+async function prepareProfile(profile, bytes) {
+  core.inspect(new Uint8Array(active.record.bytes));
+  core.prepare(active.bios);
+  if (profile) {
+    const key = nativeKey(active.id, profile.id);
+    if (active.diskSave) await active.diskSave.load(key, core);
+    else {
+      const session = await saves.open(key, active.name, active.size, core);
+      if (session.conflict) {
+        throw new Error('This profile has multiple recovery copies. Close other emulator tabs and try again.');
+      }
+      return session;
+    }
+  } else if (bytes) {
+    if (active.diskSave) core.restoreDisk(bytes, true);
+    else if (!core.restore(bytes, true)) throw new Error(`Choose a raw ${active.size}-byte SRAM file from this ROM.`);
+  }
+}
+
+function activatePrepared() {
+  core.activate();
+  if (active.diskSave) {
+    active.diskSave.track(nativeKey(active.id, active.profile.id), core.saveRevision());
+    const requested = core.requestedDiskSide();
+    diskSide.value = String(Math.max(0, requested));
+    showDiskState();
+  }
+  if (active.save) active.save.revision = core.saveRevision();
+  clearTransient();
+  core.draw(context, image);
+  warn('save', '');
+}
+
+async function changeProfile({ id, duplicate } = {}) {
+  if (id === active.profile.id) return;
+  try {
+    await flushRequired();
+    const catalog = readProfiles(active.id);
+    let profile = catalog.profiles.find(item => item.id === id);
+    if (id && !profile) throw new Error('This profile is unavailable.');
+    let save = await prepareProfile(profile, duplicate ? nativeBytes() : undefined);
+    if (profile) {
+      catalog.selected = profile.id;
+      writeProfiles(active.id, catalog);
+    } else {
+      profile = addProfile(catalog);
+      save = await persistNewProfile(catalog, profile, nativeBytes(true), true);
+    }
+    Object.assign(active, { profile, save });
+    activatePrepared();
+    notice(`Restarted with ${profile.name}.`);
+  } finally {
+    core.discard();
+  }
+}
+
+async function importProfile(bytes) {
+  try {
+    await prepareProfile(undefined, bytes);
+    const catalog = readProfiles(active.id);
+    const profile = addProfile(catalog);
+    await persistNewProfile(catalog, profile, nativeBytes(true));
+    return profile;
+  } finally {
+    core.discard();
+  }
+}
+
+async function removeProfile(profile) {
+  const catalog = readProfiles(active.id);
+  if (await hasStates({ game: active.id, profile: profile.id })) {
+    throw new Error(`Remove the saved states for ${profile.name} before removing this profile.`);
+  }
+  if (!confirm(`Remove ${profile.name} and its game save data?`)) return;
+  const updated = { ...catalog, profiles: catalog.profiles.filter(item => item.id !== profile.id) };
+  try {
+    let replacement;
+    let newProfile;
+    let save;
+    if (profile.id === active.profile.id) {
+      await flushRequired();
+      replacement = updated.profiles[0];
+      save = await prepareProfile(replacement);
+      if (replacement) {
+        updated.selected = replacement.id;
+      } else {
+        replacement = newProfile = addProfile(updated);
+      }
+    }
+    if (newProfile) save = await persistNewProfile(updated, newProfile, nativeBytes(true), true);
+    else writeProfiles(active.id, updated);
+    try {
+      await removeNative(profile);
+    } catch (error) {
+      // Keep the original record reachable if native storage rejects the deletion.
+      writeProfiles(active.id, catalog);
+      if (newProfile) await removeNative(newProfile).catch(() => {});
+      throw error;
+    }
+    if (replacement) {
+      Object.assign(active, { profile: replacement, save });
+      activatePrepared();
+    }
+    return true;
+  } finally {
+    core.discard();
+  }
+}
+
+function sameBytes(first, second) {
+  return first.length === second.length && first.every((value, i) => value === second[i]);
+}
+
+async function preserveDisplacedProgress(copies) {
+  if (!copies.length) return;
+  const catalog = readProfiles(active.id);
+  const written = [];
+  try {
+    for (const { source, bytes } of copies) {
+      const profile = addProfile(catalog, source);
+      await writeNative(profile, bytes);
+      written.push(profile);
+    }
+    writeProfiles(active.id, catalog);
+  } catch (error) {
+    // Publish the recovery profiles only after all copies have been stored.
+    for (const profile of written) await removeNative(profile).catch(() => {});
+    throw error;
+  }
+}
+
+async function restoreNativeProgress() {
+  const restored = nativeBytes(true);
+  const live = nativeBytes();
+  const stored = active.diskSave
+    ? await active.diskSave.readProfile(nativeKey(active.id, active.profile.id))
+    : await saves.readProfile(active.save);
+  const matchesLive = sameBytes(restored, live);
+  const copies = [];
+  if (!matchesLive) copies.push({ source: 'Current progress', bytes: live });
+  if (stored && !sameBytes(stored, restored) && !sameBytes(stored, live)) {
+    copies.push({ source: 'Last saved progress', bytes: stored });
+  }
+  await preserveDisplacedProgress(copies);
+  if (matchesLive) {
+    // Persist matching live bytes before activation resets the save revision.
+    await flushRequired();
+  } else if (active.diskSave) {
+    await writeNative(active.profile, restored);
+  } else {
+    await saves.replace(active.save, restored);
+  }
+  return copies.length;
+}
+
+async function restoreState(entry) {
+  // Defer lifecycle saves while the load checks and stores native progress.
+  restoringState = true;
+  try {
+    core.prepareSnapshot(await readState(entry));
+    let recoveries = 0;
+    if (active.profile) {
+      try {
+        recoveries = await restoreNativeProgress();
+      } catch (error) {
+        throw new Error(`State load stopped because save data could not be stored. Check browser storage and retry. ${error.message}`);
+      }
+    }
+    activatePrepared();
+    if (recoveries > 1) notice('State loaded. Previous progress is in Save data as recovery profiles.');
+    else if (recoveries) notice('State loaded. Previous progress is in Save data as a recovery profile.');
+    else notice('State loaded.', 3000);
+  } finally {
+    core.discard();
+    restoringState = false;
   }
 }
 
@@ -501,8 +730,10 @@ function restart() {
 }
 get('reset').onclick = () => {
   if (!active || busy) return;
-  flushSave();
-  restart();
+  operate(async () => {
+    if (active.profile) await flushRequired();
+    restart();
+  });
 };
 async function retryDiskSave() {
   await active.diskSave.finish(core);
@@ -584,7 +815,7 @@ document.addEventListener('fullscreenchange', () => {
 });
 document.addEventListener('visibilitychange', () => {
   clearTransient();
-  flushSave();
+  if (!restoringState && (document.hidden || !busy)) flushSave();
   if (document.hidden) sound.suspend().catch(soundError);
   else if (running) sound.resume().catch(soundError);
   syncUI();
@@ -598,7 +829,7 @@ window.addEventListener('beforeunload', event => {
 });
 window.addEventListener('pagehide', () => {
   clearTransient();
-  flushSave();
+  if (!restoringState) flushSave();
 });
 
 function animate(now) {
