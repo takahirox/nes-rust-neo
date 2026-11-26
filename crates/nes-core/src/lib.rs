@@ -8,11 +8,13 @@ mod fds;
 mod fds_audio;
 mod media;
 mod ppu;
+mod snapshot;
 
 pub use cartridge::{Cartridge, Mirroring, RomError};
 pub use cpu::CpuState;
 pub use fds::{Disk, MAX_DISK_SAVE_BYTES};
 pub use media::{FDS_BIOS_BYTES, FDS_SIDE_BYTES, Media, MediaError};
+pub use snapshot::{MAX_DISK_FILE_BYTES, MAX_SNAPSHOT_BYTES, SnapshotError};
 
 use board::Board;
 
@@ -131,6 +133,14 @@ impl Nes {
     pub fn disk_side(&self) -> Option<usize> {
         match &self.bus.board {
             Board::Disk(fds) => fds.inserted(),
+            Board::Cartridge(_) => None,
+        }
+    }
+
+    /// Side requested by the user, including a side still settling in the drive.
+    pub fn requested_disk_side(&self) -> Option<usize> {
+        match &self.bus.board {
+            Board::Disk(fds) => fds.requested_side(),
             Board::Cartridge(_) => None,
         }
     }

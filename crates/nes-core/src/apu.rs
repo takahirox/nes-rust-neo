@@ -1,3 +1,5 @@
+use crate::SnapshotError;
+use crate::snapshot::{Reader, Value, state_fields, valid};
 use crate::{CPU_HZ, SAMPLE_RATE};
 
 const LENGTHS: [u8; 32] = [
@@ -502,5 +504,130 @@ impl Apu {
         self.last_90 = self.high_90;
         self.low_14k += 0.8400 * (self.high_440 - self.low_14k);
         self.audio.push(self.low_14k);
+    }
+}
+
+state_fields!(Envelope {
+    control,
+    start,
+    divider,
+    decay
+});
+state_fields!(Pulse {
+    envelope,
+    length,
+    period,
+    timer,
+    phase,
+    sweep,
+    sweep_divider,
+    sweep_reload,
+    ones_complement
+});
+state_fields!(Triangle {
+    control,
+    linear,
+    reload,
+    length,
+    period,
+    timer,
+    phase,
+    output
+});
+state_fields!(Noise {
+    envelope,
+    length,
+    control,
+    timer,
+    shift
+});
+state_fields!(Dmc {
+    control,
+    base,
+    length,
+    address,
+    remaining,
+    timer,
+    output,
+    sample,
+    shift,
+    bits,
+    silent,
+    irq
+});
+
+impl Envelope {
+    fn valid_state(&self) -> bool {
+        self.divider <= 15 && self.decay <= 15
+    }
+}
+
+impl Apu {
+    pub fn write_state(&self, out: &mut Vec<u8>) {
+        self.pulses.encode(out);
+        self.triangle.encode(out);
+        self.noise.encode(out);
+        self.dmc.encode(out);
+        self.enabled.encode(out);
+        self.five_step.encode(out);
+        self.inhibit.encode(out);
+        self.frame_irq.encode(out);
+        self.frame_cycle.encode(out);
+        self.reset_at.encode(out);
+        self.sample_phase.encode(out);
+        self.last_mix.encode(out);
+        self.high_90.encode(out);
+        self.last_90.encode(out);
+        self.high_440.encode(out);
+        self.low_14k.encode(out);
+    }
+
+    pub fn read_state(&mut self, input: &mut Reader<'_>, cycle: u64) -> Result<(), SnapshotError> {
+        self.pulses = input.value()?;
+        self.triangle = input.value()?;
+        self.noise = input.value()?;
+        self.dmc = input.value()?;
+        self.enabled = input.value()?;
+        self.five_step = input.value()?;
+        self.inhibit = input.value()?;
+        self.frame_irq = input.value()?;
+        self.frame_cycle = input.value()?;
+        self.reset_at = input.value()?;
+        self.sample_phase = input.value()?;
+        self.last_mix = input.value()?;
+        self.high_90 = input.value()?;
+        self.last_90 = input.value()?;
+        self.high_440 = input.value()?;
+        self.low_14k = input.value()?;
+        valid(
+            self.pulses.iter().enumerate().all(|(index, pulse)| {
+                pulse.phase < 8
+                    && pulse.period <= 0x7ff
+                    && pulse.timer <= 0x7ff
+                    && pulse.sweep_divider < 8
+                    && pulse.ones_complement == (index == 0)
+                    && pulse.envelope.valid_state()
+            }) && self.triangle.linear < 128
+                && self.triangle.phase < 32
+                && self.triangle.output < 16
+                && self.triangle.period <= 0x7ff
+                && self.triangle.timer <= 0x7ff
+                && self.noise.shift < 0x8000
+                && self.noise.timer < NOISE_PERIOD[15]
+                && self.noise.envelope.valid_state()
+                && self.dmc.base & 0xc03f == 0xc000
+                && self.dmc.length & 15 == 1
+                && self.dmc.length <= 4081
+                && self.dmc.remaining <= 4081
+                && (self.dmc.remaining == 0 || self.dmc.address >= 0x8000)
+                && self.dmc.output <= 127
+                && self.dmc.timer < DMC_PERIOD[0]
+                && (1..=8).contains(&self.dmc.bits)
+                && self.frame_cycle < if self.five_step { 37282 } else { 29830 }
+                && self
+                    .reset_at
+                    .is_none_or(|(when, _)| (cycle + 1..=cycle + 4).contains(&when))
+                && self.sample_phase < CPU_HZ,
+        )
     }
 }

@@ -1,9 +1,10 @@
-use std::ops::Range;
+use std::{ops::Range, sync::Arc};
 
 use crate::{
-    Mirroring,
+    Mirroring, SnapshotError,
     fds_audio::FdsAudio,
     media::{DISK_SIGNATURE, FDS_BIOS_BYTES, FDS_SIDE_BYTES, MediaError},
+    snapshot::{DISK_MAGIC, DISK_VERSION, Reader, Value, hash, open, seal, state_fields, valid},
 };
 
 // A byte cell is eight drive bits. Gaps are rounded to whole byte cells.
@@ -82,7 +83,9 @@ fn expand_side(track: &mut Vec<u8>, raw: &[u8], side: usize) -> Result<(), Media
 
 pub struct Disk {
     tracks: Vec<u8>,
-    offsets: Vec<usize>,
+    offsets: Arc<[usize]>,
+    original: Arc<[u8]>,
+    identity: [u8; 32],
 }
 
 impl Disk {
@@ -95,7 +98,12 @@ impl Disk {
             expand_side(&mut tracks, raw, index)?;
             offsets.push(tracks.len());
         }
-        Ok(Self { tracks, offsets })
+        Ok(Self {
+            original: Arc::from(tracks.as_slice()),
+            identity: hash(sides),
+            tracks,
+            offsets: Arc::from(offsets),
+        })
     }
 
     pub fn side_count(&self) -> usize {
@@ -240,7 +248,8 @@ impl Drive {
 
 pub(crate) struct Fds {
     disk: Disk,
-    bios: Box<[u8; FDS_BIOS_BYTES]>,
+    bios: Arc<[u8; FDS_BIOS_BYTES]>,
+    bios_identity: [u8; 32],
     pub prg: Box<[u8]>,
     pub chr: Box<[u8]>,
     drive: Drive,
@@ -257,7 +266,8 @@ impl Fds {
         let bios: &[u8; FDS_BIOS_BYTES] = bios.try_into().map_err(|_| MediaError::BiosSize)?;
         let mut board = Self {
             disk,
-            bios: Box::new(*bios),
+            bios: Arc::new(*bios),
+            bios_identity: hash(bios),
             prg: vec![0; 0x8000].into_boxed_slice(),
             chr: vec![0; 0x2000].into_boxed_slice(),
             drive: Drive {
@@ -280,6 +290,10 @@ impl Fds {
 
     pub fn inserted(&self) -> Option<usize> {
         self.drive.inserted
+    }
+
+    pub fn requested_side(&self) -> Option<usize> {
+        self.drive.pending.or(self.drive.inserted)
     }
 
     pub fn eject(&mut self) {
@@ -461,6 +475,176 @@ impl Fds {
             0x4040..=0x408a if self.io & 2 != 0 => self.audio.write(addr, value),
             _ => {}
         }
+    }
+}
+
+state_fields!(Timer {
+    reload,
+    remaining,
+    control,
+    irq
+});
+state_fields!(Drive {
+    inserted,
+    pending,
+    settle,
+    control,
+    head,
+    delay,
+    ready,
+    sync,
+    crc,
+    crc_error,
+    check_crc,
+    transfer,
+    irq,
+    input,
+    output
+});
+
+const SAVE_PAGE: usize = 256;
+
+impl Disk {
+    fn write_delta(&self, tracks: &[u8], out: &mut Vec<u8>) {
+        let start = out.len();
+        out.resize(start + tracks.len().div_ceil(SAVE_PAGE * 8), 0);
+        for (page, (current, original)) in tracks
+            .chunks(SAVE_PAGE)
+            .zip(self.original.chunks(SAVE_PAGE))
+            .enumerate()
+        {
+            if current != original {
+                out[start + page / 8] |= 1 << (page % 8);
+                out.extend_from_slice(current);
+            }
+        }
+    }
+
+    fn read_delta(
+        original: &[u8],
+        tracks: &mut [u8],
+        input: &mut Reader<'_>,
+    ) -> Result<(), SnapshotError> {
+        let pages = original.len().div_ceil(SAVE_PAGE);
+        let flags = input.take(pages.div_ceil(8))?;
+        if !pages.is_multiple_of(8) {
+            valid(flags[flags.len() - 1] >> (pages % 8) == 0)?;
+        }
+        for (page, (current, base)) in tracks
+            .chunks_mut(SAVE_PAGE)
+            .zip(original.chunks(SAVE_PAGE))
+            .enumerate()
+        {
+            if flags[page / 8] & (1 << (page % 8)) != 0 {
+                input.copy(current)?;
+                valid(current != base)?;
+            } else {
+                current.copy_from_slice(base);
+            }
+        }
+        Ok(())
+    }
+}
+
+impl Fds {
+    pub(crate) fn snapshot_identity(&self) -> (u8, [u8; 32], [u8; 32]) {
+        (1, self.disk.identity, self.bios_identity)
+    }
+
+    pub(crate) fn snapshot_base(&self) -> Self {
+        Self {
+            disk: Disk {
+                tracks: vec![0; self.disk.original.len()],
+                offsets: self.disk.offsets.clone(),
+                original: self.disk.original.clone(),
+                identity: self.disk.identity,
+            },
+            bios: self.bios.clone(),
+            bios_identity: self.bios_identity,
+            prg: vec![0; self.prg.len()].into_boxed_slice(),
+            chr: vec![0; self.chr.len()].into_boxed_slice(),
+            drive: Drive::default(),
+            timer: Timer::default(),
+            io: 0,
+            external: 0,
+            audio: FdsAudio::default(),
+            revision: 0,
+        }
+    }
+
+    pub(crate) fn write_state(&self, out: &mut Vec<u8>) {
+        out.extend_from_slice(&self.prg);
+        out.extend_from_slice(&self.chr);
+        self.drive.encode(out);
+        self.timer.encode(out);
+        self.io.encode(out);
+        self.external.encode(out);
+        self.audio.encode(out);
+        self.revision.encode(out);
+        self.disk.write_delta(&self.disk.tracks, out);
+    }
+
+    pub(crate) fn read_state(&mut self, input: &mut Reader<'_>) -> Result<(), SnapshotError> {
+        input.copy(&mut self.prg)?;
+        input.copy(&mut self.chr)?;
+        self.drive = input.value()?;
+        self.timer = input.value()?;
+        self.io = input.value()?;
+        self.external = input.value()?;
+        self.audio = input.value()?;
+        self.revision = input.value()?;
+        let drive = &self.drive;
+        valid(
+            self.io <= 3
+                && self.timer.control <= 3
+                && self.audio.valid_state()
+                && drive.settle <= CHANGE_CYCLES
+                && (1..=SPINUP_CYCLES).contains(&drive.delay)
+                && drive.pending.is_none_or(|side| {
+                    side < self.side_count() && drive.settle > 0 && drive.inserted.is_none()
+                })
+                && drive.inserted.map_or(drive.head == 0, |side| {
+                    side < self.side_count() && drive.settle == 0 && {
+                        let len = self.disk.track_range(side).len();
+                        drive.head < len || (drive.head == len && drive.control & 1 == 0)
+                    }
+                }),
+        )?;
+        Disk::read_delta(&self.disk.original, &mut self.disk.tracks, input)
+    }
+
+    pub(crate) fn export_save(&self, tracks: &[u8]) -> Option<Vec<u8>> {
+        (tracks.len() == self.disk.original.len()).then(|| {
+            seal(
+                DISK_MAGIC,
+                DISK_VERSION,
+                1,
+                &self.disk.identity,
+                &[0; 32],
+                |out| self.disk.write_delta(tracks, out),
+            )
+        })
+    }
+
+    pub(crate) fn disk_save_limit(&self) -> usize {
+        let len = self.disk.original.len();
+        len + len.div_ceil(SAVE_PAGE * 8) + 128
+    }
+
+    pub(crate) fn decode_save(&self, bytes: &[u8]) -> Result<Vec<u8>, SnapshotError> {
+        let mut input = open(
+            bytes,
+            self.disk_save_limit(),
+            DISK_MAGIC,
+            DISK_VERSION,
+            1,
+            &self.disk.identity,
+            &[0; 32],
+        )?;
+        let mut tracks = vec![0; self.disk.original.len()];
+        Disk::read_delta(&self.disk.original, &mut tracks, &mut input)?;
+        input.finish()?;
+        Ok(tracks)
     }
 }
 
@@ -952,5 +1136,110 @@ mod tests {
         fds.cpu_write(0x4080, 0xa0);
         assert_eq!(fds.cpu_read(0x4090, 0), 32);
         assert!(fds.tick() > 0.0);
+    }
+    #[test]
+    #[ignore = "requires the test-only FDS fixtures generated by tests/fds/check.mjs"]
+    fn source_fixture_snapshot_continuation() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/generated");
+        let image = std::fs::read(root.join("fds-relay.fds")).unwrap();
+        let headerless = std::fs::read(root.join("fds-relay-raw.fds")).unwrap();
+        let bios = std::fs::read(root.join("fds-bios.rom")).unwrap();
+        let make = |image: &[u8], bios: &[u8]| {
+            Nes::from_media(Media::parse(image).unwrap(), Some(bios)).unwrap()
+        };
+        let mut live = make(&image, &bios);
+        let mut restored = make(&headerless, &bios);
+        let mut captured_transfer = false;
+        let mut peak = 0.0f32;
+        let original = live.save_bytes().unwrap().to_vec();
+        assert_eq!(
+            restored
+                .decode_disk_save(&live.export_disk_save(&original).unwrap())
+                .unwrap(),
+            original
+        );
+
+        // Catch a transfer with asserted IRQ before fixture firmware acknowledges it.
+        for _ in 0..500_000 {
+            live.step_instruction();
+            if matches!(&live.bus.board, Board::Disk(fds) if fds.drive.transfer && fds.drive.irq) {
+                restored.restore_snapshot(&live.snapshot()).unwrap();
+                for _ in 0..200 {
+                    live.step_instruction();
+                    restored.step_instruction();
+                }
+                assert_eq!(restored.snapshot(), live.snapshot());
+                captured_transfer = true;
+                break;
+            }
+        }
+        assert!(captured_transfer);
+
+        live = make(&image, &bios);
+        for frame in 1..=285 {
+            match frame {
+                105 => live.eject_disk(),
+                106 => {
+                    assert!(live.insert_disk(1));
+                }
+                193 => {
+                    assert!(live.insert_disk(2));
+                }
+                _ => {}
+            }
+            if [1, 27, 59, 99, 105, 106, 107, 141, 191, 193, 228, 284].contains(&frame) {
+                restored.restore_snapshot(&live.snapshot()).unwrap();
+                assert!(restored.audio().is_empty());
+            } else if frame == 108 {
+                assert_eq!(restored.requested_disk_side(), Some(1));
+                assert_eq!(restored.disk_side(), None);
+            }
+            let input = match frame {
+                30..=53 | 132..=139 | 219..=226 => 0x80,
+                55..=56 | 142..=143 | 229..=230 => 1,
+                _ => 0,
+            };
+            for nes in [&mut live, &mut restored] {
+                nes.set_controller(0, input);
+                assert!(nes.run_frame());
+            }
+            assert_eq!(restored.cpu_state(), live.cpu_state());
+            assert_eq!(restored.peek_ram(0x12), live.peek_ram(0x12));
+            assert_eq!(hash(restored.frame()), hash(live.frame()));
+            assert_eq!(restored.audio(), live.audio());
+            peak = live
+                .audio()
+                .iter()
+                .fold(peak, |peak, sample| peak.max(sample.abs()));
+        }
+        assert!(peak > 0.04);
+        let progress = live.save_bytes().unwrap();
+        for (side, expected) in [0x12, 0x23, 0x34].into_iter().enumerate() {
+            assert_eq!(progress[side * BASE_TRACK_BYTES + 3560], expected);
+        }
+        assert_eq!(restored.save_bytes(), Some(progress));
+        let delta = live.export_disk_save(progress).unwrap();
+        assert_eq!(restored.decode_disk_save(&delta).unwrap(), progress);
+        let before = live.snapshot();
+        let mut wrong_bios = bios.clone();
+        wrong_bios[1] ^= 1;
+        let mut wrong = make(&image, &wrong_bios);
+        let wrong_before = wrong.snapshot();
+        assert_eq!(wrong.restore_snapshot(&before), Err(SnapshotError::Bios));
+        assert_eq!(wrong.snapshot(), wrong_before);
+        assert_eq!(wrong.decode_disk_save(&delta).unwrap(), progress);
+        let mut different = image.clone();
+        different[16 + 22] ^= 1;
+        let mut different = make(&different, &bios);
+        assert_eq!(
+            different.restore_snapshot(&before),
+            Err(SnapshotError::Media)
+        );
+        assert_eq!(
+            different.decode_disk_save(&delta),
+            Err(SnapshotError::Media)
+        );
+        assert!(live.restore_snapshot(&before[..before.len() - 1]).is_err());
+        assert_eq!(live.snapshot(), before);
     }
 }
