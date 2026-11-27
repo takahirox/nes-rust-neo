@@ -713,7 +713,7 @@ test('FDS states restore pending sides and isolate, migrate, and recover writabl
   }, id);
   await enterFullscreen();
   await button(page, 'Load state').click();
-  await expect(page.locator('#status')).toHaveText(/State load stopped.*Injected disk storage failure/);
+  await expect(page.locator('#status')).toHaveText(/Could not load the state.*Browser storage is full/);
   expect(await diskBytes()).toEqual([0x13, 0x23, 0x33]);
   expect(await frame(page)).toBe(beforeFailedLoad);
   await expect(page.getByLabel('Disk side')).toHaveValue('1');

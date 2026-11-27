@@ -55,6 +55,23 @@ function sameLayout(before, during) {
   }
 }
 
+async function openGame(page, disk) {
+  await page.addInitScript(() => {
+    const instantiate = WebAssembly.instantiate;
+    WebAssembly.instantiate = async (...args) => {
+      const result = await instantiate(...args);
+      window.machine = result.instance.exports;
+      return result;
+    };
+  });
+  await page.goto('./');
+  await expect(page.locator('#change-cartridge')).toBeEnabled();
+  if (disk) await page.locator('#bios').setInputFiles(fixture('fds-bios.rom'));
+  await page.locator('#rom').setInputFiles(fixture(disk ? 'fds-relay.fds' : 'diagnostic.nes'));
+  await page.waitForFunction(([address, value]) => window.machine.debug_peek_ram(address) === value,
+    disk ? [0x10, 1] : [0, 0xa5]);
+}
+
 for (const { name, viewport } of geometries) {
   test.describe(name, () => {
     test.use({ viewport, hasTouch: true, isMobile: true });
@@ -62,25 +79,14 @@ for (const { name, viewport } of geometries) {
     for (const media of ['NES', 'FDS']) {
       test(`${media} save feedback keeps the picture and every touch target stationary`, async ({ page, context }, testInfo) => {
         await page.addInitScript(() => {
-          const instantiate = WebAssembly.instantiate;
-          WebAssembly.instantiate = async (...args) => {
-            const result = await instantiate(...args);
-            window.machine = result.instance.exports;
-            return result;
-          };
           const put = IDBObjectStore.prototype.put;
           IDBObjectStore.prototype.put = function (...args) {
             if (window.failSnapshot && this.name === 'snapshots') throw new Error('Injected storage failure.');
             return put.apply(this, args);
           };
         });
-        await page.goto('./');
-        await expect(page.locator('#change-cartridge')).toBeEnabled();
         const disk = media === 'FDS';
-        if (disk) await page.locator('#bios').setInputFiles(fixture('fds-bios.rom'));
-        await page.locator('#rom').setInputFiles(fixture(disk ? 'fds-relay.fds' : 'diagnostic.nes'));
-        await page.waitForFunction(([address, value]) => window.machine.debug_peek_ram(address) === value,
-          disk ? [0x10, 1] : [0, 0xa5]);
+        await openGame(page, disk);
         const status = page.locator('#status');
         const save = page.locator('#save-state');
         const load = page.locator('#load-state');
@@ -153,3 +159,96 @@ for (const { name, viewport } of geometries) {
     }
   });
 }
+
+test.describe('short landscape drive status', () => {
+  test.use({ viewport: { width: 568, height: 320 }, hasTouch: true, isMobile: true });
+
+  test('loading an inserted FDS side keeps fullscreen video and controls stationary', async ({ page }) => {
+    await openGame(page, true);
+    const play = page.locator('#play');
+    const diskStatus = page.locator('#disk-status');
+    const side = page.locator('#disk-side');
+    const status = page.locator('#status');
+    await play.tap();
+    await expect(play).toHaveText('Play');
+    await page.locator('#fullscreen').tap();
+    await expect(diskStatus).toHaveText('Inserted');
+    await page.locator(':fullscreen #save-state').tap();
+    await expect(status).toHaveText('State saved.');
+
+    await side.selectOption('1');
+    await expect(diskStatus).toHaveText('Changing side…');
+    const changingSide = await layout(page);
+    await page.locator(':fullscreen #load-state').tap();
+    await expect(status).toHaveText('State loaded.');
+    await expect(diskStatus).toHaveText('Inserted');
+    await expect(side).toHaveValue('0');
+    await expect(play).toHaveText('Play');
+    sameLayout(changingSide, await layout(page));
+  });
+});
+
+test.describe('short portrait storage quota', () => {
+  test.use({ viewport: { width: 320, height: 568 }, hasTouch: true, isMobile: true });
+
+  for (const mode of ['normal', 'fullscreen']) {
+    test(`a full browser storage error fits and keeps the current game in ${mode}`, async ({ page }) => {
+      await openGame(page, false);
+      const play = page.locator('#play');
+      const status = page.locator('#status');
+      const load = page.locator('#load-state');
+      const canvasImage = () => page.locator('canvas').evaluate(canvas => canvas.toDataURL());
+      const sram = () => page.evaluate(() => window.machine.debug_peek_ram(0x6000));
+      const storedSram = () => page.evaluate(() => {
+        const key = Object.keys(localStorage).find(key => key.startsWith('nes-rust-neo/battery-v1/'));
+        return key ? atob(localStorage.getItem(key)).charCodeAt(0) : null;
+      });
+      await expect.poll(sram).toBe(0);
+      await page.locator('#save-state').tap();
+      await expect(status).toHaveText('State saved.');
+      await page.locator('canvas').focus();
+      await page.keyboard.down('x');
+      await expect.poll(sram).toBe(1);
+      await page.keyboard.up('x');
+      await play.tap();
+      await expect(play).toHaveText('Play');
+      await expect.poll(storedSram).toBe(1);
+      const currentFrame = await canvasImage();
+
+      await page.evaluate(() => {
+        let filler = '';
+        for (let size = 1024 * 1024; size >= 1024;) {
+          try {
+            const next = filler + 'x'.repeat(size);
+            localStorage.setItem('quota-test-fill', next);
+            filler = next;
+          } catch (error) {
+            if (error.name !== 'QuotaExceededError') throw error;
+            size /= 2;
+          }
+        }
+      });
+
+      if (mode === 'fullscreen') {
+        await page.locator('#fullscreen').tap();
+        await expect(page.locator(':fullscreen #load-state')).toBeVisible();
+      }
+      const before = await layout(page);
+      expect(before.scroll).toEqual([0, 0]);
+      await load.tap();
+      await expect(status).toHaveText(/Could not load the state/);
+      sameLayout(before, await layout(page));
+      await expect(status).toHaveText('Could not load the state. Browser storage is full. Free up space and retry.');
+      expect(await sram()).toBe(1);
+      expect(await storedSram()).toBe(1);
+      expect(await canvasImage()).toBe(currentFrame);
+      await expect(play).toHaveText('Play');
+
+      await page.evaluate(() => localStorage.removeItem('quota-test-fill'));
+      await load.tap();
+      await expect(status).toHaveText(/Previous progress.*recovery profile/);
+      expect(await sram()).toBe(0);
+      await expect(play).toHaveText('Play');
+    });
+  }
+});

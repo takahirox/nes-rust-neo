@@ -219,7 +219,10 @@ export function createSaveControls({
       await restoreState(entry);
     } catch (error) {
       if (error.name === 'StateUnavailable') select(entry, undefined);
-      throw new Error(`Could not load the state. ${error.message}`);
+      const detail = error.name === 'QuotaExceededError'
+        ? 'Browser storage is full. Free up space and retry.'
+        : error.message;
+      throw new Error(`Could not load the state. ${detail}`);
     }
   }, { preserveInput: true });
 
