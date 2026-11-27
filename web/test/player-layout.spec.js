@@ -7,6 +7,8 @@ const geometries = [
   { name: 'landscape', viewport: { width: 667, height: 375 } },
   { name: 'short portrait', viewport: { width: 320, height: 568 } },
   { name: 'short landscape', viewport: { width: 568, height: 320 } },
+  { name: '500px short landscape', viewport: { width: 500, height: 320 }, media: ['FDS'] },
+  { name: '550px short landscape', viewport: { width: 550, height: 320 }, media: ['FDS'] },
 ];
 const controls = [
   'canvas', '.picture', '#dpad', '#choose-state', '#save-state', '#load-state', '#save-data',
@@ -72,12 +74,12 @@ async function openGame(page, disk) {
     disk ? [0x10, 1] : [0, 0xa5]);
 }
 
-for (const { name, viewport } of geometries) {
+for (const { name, viewport, media = ['NES', 'FDS'] } of geometries) {
   test.describe(name, () => {
     test.use({ viewport, hasTouch: true, isMobile: true });
 
-    for (const media of ['NES', 'FDS']) {
-      test(`${media} save feedback keeps the picture and every touch target stationary`, async ({ page, context }, testInfo) => {
+    for (const game of media) {
+      test(`${game} save feedback keeps the picture and every touch target stationary`, async ({ page, context }, testInfo) => {
         await page.addInitScript(() => {
           const put = IDBObjectStore.prototype.put;
           IDBObjectStore.prototype.put = function (...args) {
@@ -85,7 +87,7 @@ for (const { name, viewport } of geometries) {
             return put.apply(this, args);
           };
         });
-        const disk = media === 'FDS';
+        const disk = game === 'FDS';
         await openGame(page, disk);
         const status = page.locator('#status');
         const save = page.locator('#save-state');
@@ -133,7 +135,7 @@ for (const { name, viewport } of geometries) {
           await expect(status).toHaveText('State saved.');
           sameLayout(before, await layout(page));
           await pressAndReleasePad();
-          await page.screenshot({ path: testInfo.outputPath(`${media.toLowerCase()}-${name.replaceAll(' ', '-')}-${mode}.png`) });
+          await page.screenshot({ path: testInfo.outputPath(`${game.toLowerCase()}-${name.replaceAll(' ', '-')}-${mode}.png`) });
 
           if (disk) await writeDiskProgress();
           await expect(status).toBeEmpty();
@@ -156,6 +158,32 @@ for (const { name, viewport } of geometries) {
           sameLayout(before, await layout(page));
         }
       });
+    }
+  });
+}
+
+for (const height of [650, 800]) {
+  test(`desktop scale presets keep their dimensions during save feedback at height ${height}`, async ({ page }, testInfo) => {
+    await page.setViewportSize({ width: 1280, height });
+    await openGame(page, false);
+    const scale = page.locator('#scale');
+    const save = page.locator('#save-state');
+    const status = page.locator('#status');
+
+    for (const [preset, width, pictureHeight] of [['1', 256, 240], ['2', 512, 480], ['3', 768, 720], ['fit', 640, 600]]) {
+      await scale.selectOption(preset);
+      await page.locator('.toolbar').scrollIntoViewIfNeeded();
+      const before = await layout(page);
+      expect(before.targets['.picture'].rect.slice(2), preset).toEqual([width, pictureHeight]);
+      expect(before.targets['#scale'].fits, preset).toBe(true);
+
+      await save.click();
+      await expect(status).toHaveText('State saved.');
+      const during = await layout(page);
+      expect(during, preset).toEqual({ ...before, notice: expect.any(Object), statusFits: true });
+      if (preset === '3') await page.screenshot({ path: testInfo.outputPath(`desktop-1280x${height}-3x.png`) });
+      await expect(status).toBeEmpty();
+      expect(await layout(page)).toEqual(before);
     }
   });
 }
