@@ -95,14 +95,14 @@ for (const { name, viewport, media = ['NES', 'FDS'] } of geometries) {
         const pad = page.locator(disk ? '[data-pad="2"]' : '[data-pad="1"]');
         const client = await context.newCDPSession(page);
 
-        async function pressAndReleasePad() {
-          const { x, y, width, height } = await pad.boundingBox();
+        async function pressAndReleasePad(button) {
+          const { x, y, width, height } = await button.boundingBox();
           await client.send('Input.dispatchTouchEvent', {
             type: 'touchStart', touchPoints: [{ x: x + width / 2, y: y + height / 2 }],
           });
-          await expect(pad).toHaveAttribute('data-active', '');
+          await expect(button).toHaveAttribute('data-active', '');
           await client.send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] });
-          await expect(pad).not.toHaveAttribute('data-active', '');
+          await expect(button).not.toHaveAttribute('data-active', '');
         }
 
         async function writeDiskProgress() {
@@ -134,7 +134,7 @@ for (const { name, viewport, media = ['NES', 'FDS'] } of geometries) {
           await save.tap();
           await expect(status).toHaveText('State saved.');
           sameLayout(before, await layout(page));
-          await pressAndReleasePad();
+          await pressAndReleasePad(pad);
           await page.screenshot({ path: testInfo.outputPath(`${game.toLowerCase()}-${name.replaceAll(' ', '-')}-${mode}.png`) });
 
           if (disk) await writeDiskProgress();
@@ -156,6 +156,27 @@ for (const { name, viewport, media = ['NES', 'FDS'] } of geometries) {
           await expect(status).toHaveText('State saved.');
           await expect(status).toBeEmpty();
           sameLayout(before, await layout(page));
+        }
+
+        if (name === '500px short landscape') {
+          const saveData = page.locator('#save-data');
+          const profiles = page.getByRole('dialog', { name: 'Save data' });
+          await saveData.tap();
+          const recovery = profiles.getByRole('button', { name: /^Recovery · Current progress ·/ }).first();
+          const recoveryName = await recovery.textContent();
+          await recovery.tap();
+          await expect(profiles).toBeHidden();
+          await page.locator('#exit-fullscreen').tap();
+          await expect(page.locator(':fullscreen')).toHaveCount(0);
+          await expect(page.locator('#active-save-name')).toHaveText(recoveryName);
+
+          const start = page.getByRole('button', { name: 'Start', exact: true });
+          const profileBounds = await saveData.boundingBox();
+          const startBounds = await start.boundingBox();
+          expect(profileBounds.x + profileBounds.width).toBeLessThanOrEqual(startBounds.x);
+          await pressAndReleasePad(start);
+          await saveData.tap();
+          await expect(profiles.getByRole('button', { name: recoveryName, exact: true })).toHaveAttribute('aria-current', 'true');
         }
       });
     }
