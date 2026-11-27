@@ -38,6 +38,8 @@ Disk games start with the first side inserted. Select **Disk side** to change si
 
 ## Save and resume
 
+The same save controls are available along the bottom of the fullscreen player. The browser or operating system may leave fullscreen when it opens a native file picker.
+
 - Open **Save state ▾** to choose **New state** or a timestamped screenshot. **Save** captures the machine and overwrites the selected entry on subsequent saves. **Load** explicitly restores the target and keeps your Play or Pause setting. The picker also offers **Remove**, **Export** and **Import state**. An import creates a separate entry.
 - **Save data** appears beside battery-backed cartridges and FDS games. Select a profile to restart the game with its progress. **New save** starts fresh, **Duplicate current** copies the current progress, and **Import save data** opens the import as a separate profile. **Save 1** adopts the browser’s existing native save. Reset keeps progress in the active profile. Remove a profile’s attached states before removing the profile.
 - Loading a state backs up each distinct version of native progress it would replace. **Save data** shows separate **Recovery** profiles for current and last saved progress when both differ from the state and from each other. If a required storage write fails, keep the current tab open and follow the retry message. Disk changes must be saved before switching games. Existing battery-save recovery controls handle conflicting legacy drafts.
