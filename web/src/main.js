@@ -577,46 +577,18 @@ function sameBytes(first, second) {
   return first.length === second.length && first.every((value, i) => value === second[i]);
 }
 
-async function preserveDisplacedProgress(copies) {
-  if (!copies.length) return;
-  const catalog = readProfiles(active.id);
-  const written = [];
-  try {
-    for (const { source, bytes } of copies) {
-      const profile = addProfile(catalog, source);
-      await writeNative(profile, bytes);
-      written.push(profile);
-    }
-    writeProfiles(active.id, catalog);
-  } catch (error) {
-    // Publish the recovery profiles only after all copies have been stored.
-    for (const profile of written) await removeNative(profile).catch(() => {});
-    throw error;
-  }
-}
-
 async function restoreNativeProgress() {
   const restored = nativeBytes(true);
-  const live = nativeBytes();
-  const stored = active.diskSave
-    ? await active.diskSave.readProfile(nativeKey(active.id, active.profile.id))
-    : await saves.readProfile(active.save);
-  const matchesLive = sameBytes(restored, live);
-  const copies = [];
-  if (!matchesLive) copies.push({ source: 'Current progress', bytes: live });
-  if (stored && !sameBytes(stored, restored) && !sameBytes(stored, live)) {
-    copies.push({ source: 'Last saved progress', bytes: stored });
-  }
-  await preserveDisplacedProgress(copies);
-  if (matchesLive) {
+  if (sameBytes(restored, nativeBytes())) {
     // Persist matching live bytes before activation resets the save revision.
     await flushRequired();
   } else if (active.diskSave) {
+    // Let a queued autosave finish before replacing the stored disk changes.
+    await active.diskSave.writing?.promise;
     await writeNative(active.profile, restored);
   } else {
     await saves.replace(active.save, restored);
   }
-  return copies.length;
 }
 
 async function restoreState(entry) {
@@ -624,11 +596,9 @@ async function restoreState(entry) {
   restoringState = true;
   try {
     core.prepareSnapshot(await readState(entry));
-    const recoveries = active.profile ? await restoreNativeProgress() : 0;
+    if (active.profile) await restoreNativeProgress();
     activatePrepared();
-    if (recoveries > 1) notice('State loaded. Previous progress is in Save data as recovery profiles.');
-    else if (recoveries) notice('State loaded. Previous progress is in Save data as a recovery profile.');
-    else notice('State loaded.', 3000);
+    notice('State loaded.', 3000);
   } finally {
     core.discard();
     restoringState = false;
