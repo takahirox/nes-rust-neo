@@ -294,7 +294,20 @@ canvas:focus-visible { outline-offset: -3px; }
 @media (orientation: landscape) and (max-width: 760px) and (max-height: 360px) {
   main { padding-inline: max(8px, env(safe-area-inset-left)) max(8px, env(safe-area-inset-right)); }
   header { margin-bottom: 4px; }
-  .player { gap: 4px; }
+  .player { position: relative; gap: 4px; }
+  /* Overlay the picture column so notices stay above the toolbar and clear of the touch pads. */
+  .game-presentation:not(:fullscreen) #status {
+    position: absolute;
+    grid-area: 1 / 2 / 2 / 3;
+    inset: 0 0 auto;
+    z-index: 1;
+    height: auto;
+    border-radius: 8px;
+    background: var(--screen);
+    color: #e3e8eb;
+    pointer-events: none;
+  }
+  .game-presentation:not(:fullscreen) #status:not(:empty) { padding: 4px 8px; }
   /* Keep the playback controls and settings on one row at short heights. */
   .toolbar button { font-size: 12px; }
   #play { width: 54px; }
@@ -310,7 +323,7 @@ canvas:focus-visible { outline-offset: -3px; }
     .toolbar .options select { font-size: 12px; padding-inline: 1px; }
     #volume { width: 48px; }
     .game-entry { column-gap: 4px; }
-    .game-entry #save-data { max-width: none; padding-inline: 4px; white-space: nowrap; }
+    .game-entry #save-data { padding-inline: 4px; white-space: nowrap; }
     #change-cartridge { padding-inline: 6px; }
     #cartridge-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   }
