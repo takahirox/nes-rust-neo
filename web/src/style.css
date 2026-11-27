@@ -103,7 +103,7 @@ button:hover:enabled { background: #edf0ec; }
 .picture {
   position: relative;
   width: var(--video-width, 768px);
-  max-width: min(100%, calc(max(160px, 100svh - 226px) * var(--nes-aspect)));
+  max-width: 100%;
   aspect-ratio: var(--nes-aspect);
 }
 [data-scale="fit"] { --video-width: 640px; }
@@ -189,6 +189,11 @@ canvas:focus-visible { outline-offset: -3px; }
 #library-status:empty { display: none; }
 #warnings { color: #805511; font-size: 13px; overflow-wrap: anywhere; }
 #save-versions { display: flex; flex-wrap: wrap; gap: 8px; }
+
+@media (width > 1100px) and (not (pointer: coarse)) {
+  .toolbar { grid-area: 2 / 1; }
+  #status { grid-area: 2 / 2; }
+}
 
 .touch, .fullscreen-controls, #fullscreen-save-warning { display: none; }
 @media (max-width: 760px), (pointer: coarse), (orientation: landscape) and (max-height: 600px) and (max-width: 1100px) {
@@ -296,6 +301,19 @@ canvas:focus-visible { outline-offset: -3px; }
   .toolbar #choose-state { inline-size: 92px; }
   .toolbar .options label { flex-direction: column; gap: 0; }
   .toolbar .options select { min-height: 26px; padding-block: 2px; }
+  @media (width < 560px) {
+    .toolbar { column-gap: 3px; }
+    #play { width: 50px; padding-inline: 4px; }
+    .toolbar #choose-state { inline-size: 82px; }
+    .toolbar :is(#reset, #save-state, #load-state) { padding-inline: 2px; }
+    .toolbar .options { gap: 2px; }
+    .toolbar .options select { font-size: 12px; padding-inline: 1px; }
+    #volume { width: 48px; }
+    .game-entry { column-gap: 4px; }
+    .game-entry #save-data { max-width: none; padding-inline: 4px; white-space: nowrap; }
+    #change-cartridge { padding-inline: 6px; }
+    #cartridge-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  }
 }
 
 .game-presentation:fullscreen {
@@ -448,8 +466,20 @@ canvas:focus-visible { outline-offset: -3px; }
 @media (orientation: landscape) and (min-width: 560px) and (max-width: 760px) and (max-height: 360px) {
   #disk-controls { flex-wrap: nowrap; }
 }
+@media (orientation: landscape) and (width < 560px) and (max-height: 360px) {
+  /* The selected option already names the disk and side. Keep the label for assistive technology. */
+  #disk-side-label {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip-path: inset(50%);
+    white-space: nowrap;
+  }
+  #disk-status { width: 64px; }
+}
 .game-presentation:not(:fullscreen) .screen:has(#disk-controls:not([hidden])) .picture {
-  max-width: min(100%, calc(max(160px, 100svh - 266px) * var(--nes-aspect)));
+  max-width: min(100%, calc(max(160px, 100svh - 212px) * var(--nes-aspect)));
 }
 @media (max-width: 760px), (pointer: coarse), (orientation: landscape) and (max-height: 600px) and (max-width: 1100px) {
   .game-presentation:not(:fullscreen) .screen:has(#disk-controls:not([hidden])) .picture {
