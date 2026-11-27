@@ -17,16 +17,23 @@ moved the D-pad from y=568.75 to y=592.25 CSS pixels and Start from y=708.75
 to y=732.25. Both returned to their original positions when the notice
 expired. The window scroll offset stayed at zero.
 
+PR #12 review reproduced a separate visibility issue in normal FDS play.
+At scroll position zero, the top of “State saved.” was at y=568.48 in a
+320×568 viewport and y=345.48 in a 568×320 viewport. With the compact
+layouts, the text spans y=330.48–346.48 and y=283.48–299.48 respectively,
+with the scroll offset still at zero.
+
 [The regression test](../web/test/player-layout.spec.js) runs the production
 Wasm with the repository's NES diagnostic cartridge and FDS relay with its
 fixture BIOS. It records `getBoundingClientRect()` for the picture, canvas,
-D-pad, each direction, A/B, Start/Select and visible controls. In all eight
-combinations of media, orientation and presentation, each coordinate and
+D-pad, each direction, A/B, Start/Select and visible controls. In all 16
+combinations of media, viewport and presentation, each coordinate and
 dimension stayed within 1 CSS pixel of the baseline for that layout. The
 test checks these conditions during save feedback, after it expires, after a
 load that creates a recovery profile, after a short load notice replaces it,
 and after a failed snapshot write. It also checks unchanged scroll offsets,
-visible text, center hit-testing and touch release.
+the full notice text bounds within the viewport, center hit-testing and touch
+release.
 
 ## Fullscreen workflows
 
@@ -61,6 +68,8 @@ controls visible. All captures use the repository's generated fixtures.
 | Portrait 320×640 | FDS | [Normal](player-ui/fds-portrait-normal.png) | [Fullscreen](player-ui/fds-portrait-fullscreen.png) |
 | Landscape 667×375 | NES | [Normal](player-ui/nes-landscape-normal.png) | [Fullscreen](player-ui/nes-landscape-fullscreen.png) |
 | Landscape 667×375 | FDS | [Normal](player-ui/fds-landscape-normal.png) | [Fullscreen](player-ui/fds-landscape-fullscreen.png) |
+| Portrait 320×568 | FDS | [Normal](player-ui/fds-short-portrait-normal.png) | [Fullscreen](player-ui/fds-short-portrait-fullscreen.png) |
+| Landscape 568×320 | FDS | [Normal](player-ui/fds-short-landscape-normal.png) | [Fullscreen](player-ui/fds-short-landscape-fullscreen.png) |
 
 [Portrait fullscreen state history](player-ui/nes-portrait-fullscreen-history.png)
 shows the shared picker with timestamped previews and per-entry actions.
@@ -79,7 +88,7 @@ Run on macOS with Rust stable 1.99, Node.js 26 and Playwright 1.62 Chromium.
 | `cargo build --locked -p nes-wasm --target wasm32-unknown-unknown --release` | Passed |
 | `npm --prefix web ci` and `npm --prefix web run build` | Passed |
 | `npx --prefix web playwright install chromium` | Passed |
-| `npm --prefix web test` | 42 Chromium tests passed against the production Wasm. |
+| `npm --prefix web test` | 46 Chromium tests passed against the production Wasm. |
 | `node tests/check-static.mjs` | Passed the production asset allowlist, Wasm validation, network call audit and tracked media check. |
 | `git diff --check` | Passed |
 
