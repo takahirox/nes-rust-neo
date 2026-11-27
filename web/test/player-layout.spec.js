@@ -5,6 +5,8 @@ const fixture = name => fileURLToPath(new URL(`../../tests/generated/${name}`, i
 const geometries = [
   { name: 'portrait', viewport: { width: 320, height: 640 } },
   { name: 'landscape', viewport: { width: 667, height: 375 } },
+  { name: 'short portrait', viewport: { width: 320, height: 568 } },
+  { name: 'short landscape', viewport: { width: 568, height: 320 } },
 ];
 const controls = [
   'canvas', '.picture', '#dpad', '#choose-state', '#save-state', '#load-state', '#save-data',
@@ -29,17 +31,20 @@ function layout(page) {
       };
     }
     const status = document.querySelector('#status');
+    const text = document.createRange();
+    text.selectNodeContents(status);
+    const notice = status.textContent ? text.getBoundingClientRect().toJSON() : null;
     return {
-      targets, scroll: [scrollX, scrollY],
-      statusFits: status.scrollHeight === status.clientHeight &&
-        status.getBoundingClientRect().bottom <= innerHeight + 1,
+      targets, scroll: [scrollX, scrollY], notice,
+      statusFits: !notice || (notice.width > 0 && notice.height > 0 && status.scrollHeight <= status.clientHeight &&
+        notice.left >= 0 && notice.right <= innerWidth && notice.top >= 0 && notice.bottom <= innerHeight),
     };
   }, controls);
 }
 
 function sameLayout(before, during) {
   expect(during.scroll).toEqual(before.scroll);
-  expect(during.statusFits).toBe(true);
+  expect(during.statusFits, `Notice text bounds: ${JSON.stringify(during.notice)}`).toBe(true);
   expect(Object.keys(during.targets)).toEqual(Object.keys(before.targets));
   for (const [selector, { rect, receivesTouch, fits }] of Object.entries(during.targets)) {
     const delta = rect.map((value, index) => Math.abs(value - before.targets[selector].rect[index]));
@@ -122,7 +127,7 @@ for (const { name, viewport } of geometries) {
           await expect(status).toHaveText('State saved.');
           sameLayout(before, await layout(page));
           await pressAndReleasePad();
-          await page.screenshot({ path: testInfo.outputPath(`${media.toLowerCase()}-${name}-${mode}.png`) });
+          await page.screenshot({ path: testInfo.outputPath(`${media.toLowerCase()}-${name.replaceAll(' ', '-')}-${mode}.png`) });
 
           if (disk) await writeDiskProgress();
           await expect(status).toBeEmpty();
