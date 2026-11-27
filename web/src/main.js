@@ -624,14 +624,7 @@ async function restoreState(entry) {
   restoringState = true;
   try {
     core.prepareSnapshot(await readState(entry));
-    let recoveries = 0;
-    if (active.profile) {
-      try {
-        recoveries = await restoreNativeProgress();
-      } catch (error) {
-        throw new Error(`State load stopped because save data could not be stored. Check browser storage and retry. ${error.message}`);
-      }
-    }
+    const recoveries = active.profile ? await restoreNativeProgress() : 0;
     activatePrepared();
     if (recoveries > 1) notice('State loaded. Previous progress is in Save data as recovery profiles.');
     else if (recoveries) notice('State loaded. Previous progress is in Save data as a recovery profile.');

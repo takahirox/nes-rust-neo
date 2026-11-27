@@ -347,7 +347,7 @@ test('battery profiles adopt Save 1, retain displaced progress and abort failed 
   await button(picker, 'Close').click();
 
   await button(page, 'Load state').click();
-  await expect(page.locator('#status')).toHaveText(/State load stopped.*Injected recovery write failure/);
+  await expect(page.locator('#status')).toHaveText(/Could not load the state.*Browser storage is full/);
   expect(await ram(page, 0x6000)).toBe(5);
   expect(await canvasImage(page)).toBe(newerFrame);
   await expect(button(page, 'Play')).toBeEnabled();
@@ -360,7 +360,7 @@ test('battery profiles adopt Save 1, retain displaced progress and abort failed 
     window.failedCatalog = true;
   });
   await button(page, 'Load state').click();
-  await expect(page.locator('#status')).toHaveText(/State load stopped.*Injected profile catalog failure/);
+  await expect(page.locator('#status')).toHaveText(/Could not load the state.*Browser storage is full/);
   expect(await ram(page, 0x6000)).toBe(5);
   expect(await storedByte()).toBe(4);
   expect(await page.evaluate(key => Object.keys(localStorage).filter(item => item.startsWith(key + ':')), baseKey)).toEqual([]);
