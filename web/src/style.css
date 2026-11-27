@@ -386,6 +386,25 @@ canvas:focus-visible { outline-offset: -3px; }
     }
     .game-presentation:fullscreen .screen { grid-area: 1 / 2; }
     .game-presentation:fullscreen .touch { display: contents; }
+    @media (max-height: 360px) {
+      .game-presentation:fullscreen {
+        /* Leave room for the D-pad, system buttons, and the gap between them. */
+        grid-template-rows: minmax(calc(4 * 44px + 8px), 1fr) auto auto auto minmax(0, max-content);
+      }
+      .game-presentation:fullscreen #fullscreen-save-warning {
+        flex-wrap: nowrap;
+        min-block-size: 0;
+        padding-block: 1px;
+        line-height: 14px;
+      }
+      #fullscreen-save-message {
+        align-self: stretch;
+        align-content: safe center;
+        min-inline-size: 0;
+        overflow: auto;
+        overscroll-behavior: contain;
+      }
+    }
   }
 }
 

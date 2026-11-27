@@ -479,6 +479,52 @@ test('fullscreen disk changes preserve keyboard play and failed saves can be ret
   expect(await peek(page, 0x12)).toBe(0x23);
 });
 
+test.describe('short landscape fullscreen save warning', () => {
+  test.use({ viewport: { width: 568, height: 320 }, hasTouch: true, isMobile: true });
+
+  test('all touch controls remain usable while a disk write can be retried', async ({ page }, testInfo) => {
+    const name = 'FDS Relay (Japan) (English Translation) (Revision 2) (Diagnostic Build).fds';
+    const id = await saveKey(multi);
+    await injectDiskFailures(page);
+    await ready(page);
+    await picker(page);
+    await chooseFile(page, 'Open local game…', {
+      name, mimeType: 'application/octet-stream', buffer: await readFile(fixture(multi)),
+    });
+    await localBios(page);
+    await loaded(page, name);
+    await booted(page);
+    await button(page, 'Fullscreen').tap();
+    const fullscreen = page.locator('#game-presentation:fullscreen');
+    await expect(fullscreen).toBeVisible();
+    await page.locator('canvas').focus();
+    await page.evaluate(() => { window.failDisk = 'put'; });
+    await deliver(page);
+
+    const warning = fullscreen.locator('#fullscreen-save-message');
+    await expect(warning).toHaveText(`Could not save disk changes for ${name}. Keep this tab open and retry save storage.`);
+    const retry = button(fullscreen, 'Retry save storage');
+    const pads = fullscreen.locator('[data-pad]');
+    await expect(pads).toHaveCount(8);
+    await page.screenshot({ path: testInfo.outputPath('fds-short-landscape-fullscreen-save-warning.png') });
+    for (const target of [
+      ...await pads.all(), button(fullscreen, 'Exit fullscreen'),
+      fullscreen.getByLabel('Disk side'), button(fullscreen, 'Eject'), retry,
+    ]) {
+      await expect(target).toBeInViewport({ ratio: 1 });
+      await target.tap({ trial: true });
+    }
+    await expect(warning).toBeInViewport({ ratio: 1 });
+    expect(await warning.evaluate(element => element.scrollHeight)).toBeLessThanOrEqual(
+      await warning.evaluate(element => element.clientHeight));
+    expect(await diskStorage(page, id)).toBeUndefined();
+    await retryDiskWrite(retry);
+    await expect(warning).toBeHidden();
+    await expect(fullscreen).toBeVisible();
+    expect(await diskStorage(page, id)).toEqual([0x12, 0x22, 0x33]);
+  });
+});
+
 for (const layout of [
   { name: 'desktop', options: { viewport: { width: 1280, height: 900 } } },
   { name: 'portrait', options: { ...devices['iPhone 13'], viewport: { width: 390, height: 844 } } },
