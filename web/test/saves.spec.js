@@ -360,6 +360,8 @@ test('battery profiles adopt Save 1, retain displaced progress and abort failed 
     window.failedCatalog = true;
   });
   await button(page, 'Load state').click();
+  // The previous quota notice is still visible while this load rolls back.
+  await expect(button(page, 'Load state')).toBeEnabled();
   await expect(page.locator('#status')).toHaveText(/Could not load the state.*Browser storage is full/);
   expect(await ram(page, 0x6000)).toBe(5);
   expect(await storedByte()).toBe(4);
