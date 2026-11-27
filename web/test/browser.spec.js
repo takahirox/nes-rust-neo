@@ -280,6 +280,43 @@ test('CRT scanlines fade at mobile size and return at desktop size', async ({ pa
 test.describe('coarse-pointer player', () => {
   test.use({ hasTouch: true, isMobile: true, viewport: { width: 844, height: 390 } });
 
+  test('speaker icon reflects slider, keyboard, touch and retained volume after reload', async ({ page }) => {
+    await coreReady(page);
+    const mute = page.locator('#mute');
+    const volume = page.getByRole('slider', { name: 'Volume' });
+    const waves = mute.locator('.sound-waves');
+    const cross = mute.locator('.mute-mark');
+
+    async function speaker(muted, level) {
+      const label = muted ? 'Unmute' : 'Mute';
+      await expect(mute).toHaveAccessibleName(label);
+      await expect(mute).toHaveAttribute('aria-pressed', String(muted));
+      await expect(mute).toHaveAttribute('title', label);
+      await expect(volume).toHaveValue(String(level));
+      await expect(volume).toHaveAttribute('aria-valuetext', muted ? '0% (muted)' : `${level}%`);
+      await expect(muted ? cross : waves).toBeVisible();
+      await expect(muted ? waves : cross).toBeHidden();
+      await expect(mute).toHaveText('');
+      await expect(mute).toHaveCSS('width', '44px');
+      await expect(mute).toHaveCSS('height', '44px');
+    }
+
+    await speaker(false, 100);
+    await volume.fill('37');
+    await speaker(false, 37);
+    await mute.focus();
+    await page.keyboard.press('Space');
+    await speaker(true, 0);
+    await mute.tap();
+    await speaker(false, 37);
+    await volume.fill('0');
+    await speaker(true, 0);
+    await page.reload();
+    await speaker(true, 0);
+    await mute.tap();
+    await speaker(false, 37);
+  });
+
   test('landscape D-pad fits beside the video and touch works in both fullscreen orientations', async ({ page, context }) => {
     await coreReady(page);
     expect(await page.evaluate(() => matchMedia('(pointer: coarse)').matches)).toBe(true);

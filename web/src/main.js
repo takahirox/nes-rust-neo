@@ -61,9 +61,9 @@ function warn(category, message) {
   if (get('warnings').textContent !== text) get('warnings').textContent = text;
   get('warnings').hidden = parts.length === 0;
   get('retry-save').hidden = Boolean(pendingGame?.conflict) || (!pendingGame && !saveWarning);
-  const fullscreenWarning = get('fullscreen-disk-warning');
-  if (fullscreenWarning.textContent !== diskWarning) fullscreenWarning.textContent = diskWarning;
-  get('fullscreen-disk-save').hidden = !diskWarning;
+  const fullscreenWarning = get('fullscreen-save-message');
+  if (fullscreenWarning.textContent !== saveWarning) fullscreenWarning.textContent = saveWarning;
+  get('fullscreen-save-warning').hidden = !saveWarning;
 }
 
 function soundError(error) {
@@ -84,8 +84,19 @@ function enabled() {
 }
 const pads = controls(document.querySelector('.touch'), enabled, unlockAudio);
 const saveControls = createSaveControls({
-  current: () => ({ active, busy, core }), operate, notice, restoreState, changeProfile, importProfile, removeProfile,
+  current: () => ({ active, busy, core }), operate, notice, releaseInput: pads.clear,
+  focusSaveControl, restoreState, changeProfile, importProfile, removeProfile,
 });
+
+function focusSaveControl(control) {
+  const focus = () => control.focus({ preventScroll: true });
+  if (document.fullscreenElement !== presentation && presentation.contains(control)) {
+    // Fullscreen styles can change a frame before fullscreenchange moves the controls back.
+    document.addEventListener('fullscreenchange', focus, { once: true });
+  } else {
+    focus();
+  }
+}
 
 function syncUI() {
   play.textContent = running ? 'Pause' : 'Play';
@@ -93,7 +104,7 @@ function syncUI() {
   get('reset').disabled = !active || busy;
   gameButton.disabled = !core || busy;
   get('open-file').disabled = !core || busy;
-  get('retry-save').disabled = get('fullscreen-retry-disk').disabled = busy;
+  get('retry-save').disabled = get('fullscreen-retry-save').disabled = busy;
   get('save-choices').disabled = busy;
   diskSide.disabled = diskToggle.disabled = busy;
   biosButton.disabled = get('forget-bios').disabled = get('cancel-bios').disabled = busy;
@@ -140,8 +151,11 @@ function applyPreferences() {
   const volume = prefs.muted ? 0 : prefs.volume;
   get('volume').value = volume;
   get('volume').setAttribute('aria-valuetext', volume ? `${volume}%` : '0% (muted)');
-  get('mute').setAttribute('aria-pressed', String(prefs.muted));
-  get('mute').textContent = prefs.muted ? 'Unmute' : 'Mute';
+  const mute = get('mute');
+  const muteLabel = prefs.muted ? 'Unmute' : 'Mute';
+  mute.setAttribute('aria-pressed', String(prefs.muted));
+  mute.setAttribute('aria-label', muteLabel);
+  mute.title = muteLabel;
   sound.settings(prefs.volume / 100, prefs.muted);
 }
 
@@ -518,12 +532,12 @@ async function importProfile(bytes) {
   }
 }
 
-async function removeProfile(profile) {
+async function removeProfile(profile, confirmRemoval) {
   const catalog = readProfiles(active.id);
   if (await hasStates({ game: active.id, profile: profile.id })) {
     throw new Error(`Remove the saved states for ${profile.name} before removing this profile.`);
   }
-  if (!confirm(`Remove ${profile.name} and its game save data?`)) return;
+  if (!await confirmRemoval(`Remove ${profile.name} and its game save data?`)) return;
   const updated = { ...catalog, profiles: catalog.profiles.filter(item => item.id !== profile.id) };
   try {
     let replacement;
@@ -735,27 +749,21 @@ get('reset').onclick = () => {
     restart();
   });
 };
-async function retryDiskSave() {
-  await active.diskSave.finish(core);
+async function retryActiveSave() {
+  if (active?.diskSave) await active.diskSave.finish(core);
+  else await flushSave();
+  if (await saves.retry(active?.save, core)) {
+    restart();
+    if (running) notice('Battery save restored. Game restarted.');
+  }
   warn('save', '');
 }
-get('fullscreen-retry-disk').onclick = () => operate(retryDiskSave);
+get('fullscreen-retry-save').onclick = () => operate(retryActiveSave);
 get('retry-save').onclick = () => {
-  if (pendingGame) unlockAudio();
-  operate(async () => {
-    if (pendingGame) {
-      const { record, rememberImport } = pendingGame;
-      await insert(record, rememberImport);
-      return;
-    }
-    if (active?.diskSave) await retryDiskSave();
-    else await flushSave();
-    if (await saves.retry(active?.save, core)) {
-      restart();
-      if (running) notice('Battery save restored. Game restarted.');
-    }
-    warn('save', '');
-  });
+  if (!pendingGame) return operate(retryActiveSave);
+  unlockAudio();
+  const { record, rememberImport } = pendingGame;
+  return operate(() => insert(record, rememberImport));
 };
 help.addEventListener('toggle', () => {
   if (help.open) pads.clear();
@@ -789,6 +797,10 @@ get('scale').onchange = event => { prefs.scale = event.target.value; storePrefer
 get('display').onchange = event => { prefs.display = event.target.value; storePreferences(); };
 
 const fullscreen = get('fullscreen');
+const exitFullscreen = get('exit-fullscreen');
+const stateControls = get('state-controls');
+const saveData = get('save-data');
+const normalSaveData = saveData.parentElement;
 const playerChrome = document.querySelectorAll('header, .toolbar, .game-entry, .notices');
 let fullscreenFromKeyboard = false;
 fullscreen.onclick = async event => {
@@ -799,13 +811,21 @@ fullscreen.onclick = async event => {
     notice('Fullscreen is unavailable in this browser.');
   }
 };
-get('exit-fullscreen').onclick = () => document.exitFullscreen().catch(() => notice('Could not leave fullscreen.'));
+exitFullscreen.onclick = () => document.exitFullscreen().catch(() => notice('Could not leave fullscreen.'));
 document.addEventListener('fullscreenchange', () => {
   const expanded = document.fullscreenElement === presentation;
   for (const element of playerChrome) element.inert = expanded;
-  pads.clear();
   if (expanded) {
-    const target = active ? canvas : get('exit-fullscreen');
+    exitFullscreen.before(stateControls, saveData);
+  } else {
+    fullscreen.before(stateControls);
+    normalSaveData.append(saveData);
+  }
+  pads.clear();
+  // A native picker or browser shortcut can leave fullscreen while a dialog is open.
+  if (saveControls.dialogOpen()) return;
+  if (expanded) {
+    const target = active ? canvas : exitFullscreen;
     target.focus({ preventScroll: true });
   } else if (fullscreenFromKeyboard || !active) {
     fullscreen.focus({ preventScroll: true });
