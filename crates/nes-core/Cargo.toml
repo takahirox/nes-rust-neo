@@ -1,8 +1,0 @@
-[package]
-name = "nes-core"
-version.workspace = true
-edition.workspace = true
-rust-version.workspace = true
-
-[dependencies]
-sha2 = "0.10.9"
