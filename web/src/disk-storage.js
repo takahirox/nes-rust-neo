@@ -67,14 +67,6 @@ export class DiskSave {
     return record;
   }
 
-  async readProfile(key) {
-    await this.writing?.promise;
-    const record = await this.#readRecord(key);
-    if (record === undefined) return;
-    if (record.version !== 2) throw new Error('The stored disk data is invalid.');
-    return record.bytes;
-  }
-
   async load(key, core) {
     const record = await this.#readRecord(key);
     if (record === undefined) return;

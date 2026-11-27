@@ -319,11 +319,6 @@ export class BatterySaves {
     });
   }
 
-  async readProfile(session) {
-    await session.writing;
-    return decode(localStorage.getItem(savePrefix + session.id), session.size);
-  }
-
   async writeProfile(id, bytes) {
     const key = savePrefix + id;
     await navigator.locks.request(key, () => localStorage.setItem(key, encode(bytes)));
