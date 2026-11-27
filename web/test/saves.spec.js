@@ -68,11 +68,10 @@ async function nativeProfiles(page, name) {
   return profilePicker(page);
 }
 
-function accept(page, prompt) {
-  page.once('dialog', async dialog => {
-    expect(dialog.message()).toMatch(prompt);
-    await dialog.accept();
-  });
+async function acceptRemoval(page, prompt) {
+  const confirmation = page.getByRole('dialog', { name: 'Confirm removal' });
+  await expect(confirmation).toHaveAccessibleDescription(prompt);
+  await button(confirmation, 'Remove').click();
 }
 
 async function exportFrom(page, control, extension) {
@@ -166,6 +165,10 @@ test('unified history saves, overwrites, validates imports and explicitly loads 
   await expect(page.locator('#state-controls')).toBeHidden();
   await insert(page, 'volatile.nes', media);
   await expect(page.locator('#save-data')).toBeHidden();
+  await button(page, 'Fullscreen').click();
+  await expect(page.locator(':fullscreen #save-state')).toBeVisible();
+  await expect(page.locator(':fullscreen #save-data')).toBeHidden();
+  await button(page, 'Exit fullscreen').click();
 
   let picker = await browse(page);
   const frameAtOpen = await page.evaluate(() => window.frames);
@@ -239,15 +242,15 @@ test('unified history saves, overwrites, validates imports and explicitly loads 
   await expect(states(page).last().locator('[aria-current=true]')).toBeVisible();
   expect(await canvasImage(page)).toBe(overwrittenFrame);
 
-  page.once('dialog', dialog => dialog.dismiss());
   await states(page).first().getByRole('button', { name: /^Remove state/ }).click();
+  await button(page.getByRole('dialog', { name: 'Confirm removal' }), 'Cancel').click();
   await expect(states(page)).toHaveCount(3);
-  accept(page, /Remove the state saved/);
   await states(page).first().getByRole('button', { name: /^Remove state/ }).click();
+  await acceptRemoval(page, /Remove the state saved/);
   await expect(states(page)).toHaveCount(2);
   await expect(states(page).last().locator('[aria-current=true]')).toBeVisible();
-  accept(page, /Remove the state saved/);
   await states(page).last().getByRole('button', { name: /^Remove state/ }).click();
+  await acceptRemoval(page, /Remove the state saved/);
   await expect(states(page)).toHaveCount(1);
   await expect(button(picker, 'New state')).toHaveAttribute('aria-current', 'true');
   await button(picker, 'Close').click();
@@ -419,8 +422,8 @@ test('battery profiles adopt Save 1, retain displaced progress and abort failed 
   await button(profiles, 'New save').click();
   profiles = await nativeProfiles(page, 'Save 4');
   expect(await ram(page, 0x6000)).toBe(0);
-  accept(page, /Remove Save 4 and its game save data/);
   await button(profiles, 'Remove Save 4').click();
+  await acceptRemoval(page, /Remove Save 4 and its game save data/);
   await expect(page.locator('#save-data-message')).toHaveText('Removed Save 4.');
   await expect(page.locator('#active-save-name')).toHaveText('Save 1');
   await button(profiles, 'Close').click();
@@ -431,4 +434,134 @@ test('battery profiles adopt Save 1, retain displaced progress and abort failed 
   await button(page, 'battery.nes').click();
   await expect(page.locator('#active-save-name')).toHaveText('Save 1');
   expect(await ram(page, 0x6000)).toBe(3);
+});
+
+test.describe('touch fullscreen saves', () => {
+  test.use({ hasTouch: true, isMobile: true, viewport: { width: 320, height: 640 } });
+
+  test('shared NES history, profile management and focus survive fullscreen and picker dismissal', async ({ page }, testInfo) => {
+    await ready(page);
+    await insert(page, 'battery.nes', await readFile(diagnostic));
+    const choose = page.locator('#choose-state');
+    const openProfiles = page.locator('#save-data');
+    const fullscreen = page.locator('#game-presentation:fullscreen');
+    const status = page.locator('#status');
+    await save(page);
+    await progress(page, 1);
+    await pause(page);
+    const frameAtPause = await page.evaluate(() => window.frames);
+    await page.evaluate(() => {
+      window.normalChooser = document.querySelector('#choose-state');
+      window.normalProfiles = document.querySelector('#save-data');
+    });
+    await button(page, 'Fullscreen').press('Enter');
+    await expect(fullscreen.locator('#choose-state')).toBeVisible();
+    expect(await choose.evaluate(node => node === window.normalChooser)).toBe(true);
+    expect(await openProfiles.evaluate(node => node === window.normalProfiles)).toBe(true);
+    await expect(button(page, 'Load state')).toBeEnabled();
+    await save(page); // Overwrite the selected state with SRAM at 1.
+    const overwritten = await canvasImage(page);
+
+    await choose.press('Enter');
+    const picker = statePicker(page);
+    const newState = button(picker, 'New state');
+    await expect(newState).toBeFocused();
+    await page.keyboard.press('Shift+Tab');
+    await expect(button(picker, 'Close')).toBeFocused();
+    await page.keyboard.press('Escape');
+    await expect(choose).toBeFocused();
+    await expect(fullscreen).toBeVisible();
+
+    await browse(page);
+    await expect(states(page)).toHaveCount(1);
+    await newState.tap();
+    await expect(choose).toBeFocused();
+    await expect(button(page, 'Load state')).toBeDisabled();
+    await page.evaluate(() => {
+      window.machine.run_frame(1, 0);
+      window.machine.run_frame(1, 0);
+    });
+    expect(await ram(page, 0x6000)).toBe(2);
+    await save(page);
+
+    await browse(page);
+    await expect(states(page)).toHaveCount(2);
+    const importedState = await exportFrom(page, states(page).first().getByRole('button', { name: /^Export state/ }), '.nesstate');
+    const importState = button(picker, 'Import state');
+    let file = page.waitForEvent('filechooser');
+    await importState.tap();
+    await file;
+    // Intercepted OS picker does not have a dismiss command in Chromium automation.
+    await page.locator('#state-file').dispatchEvent('cancel');
+    await expect(importState).toBeFocused();
+    await expect(states(page)).toHaveCount(2);
+    await expect(fullscreen).toBeVisible();
+    await page.screenshot({ path: testInfo.outputPath('nes-portrait-fullscreen-history.png') });
+    file = page.waitForEvent('filechooser');
+    await importState.tap();
+    await (await file).setFiles(importedState);
+    await expect(page.locator('#state-message')).toHaveText(/State imported/);
+    await expect(importState).toBeFocused();
+    await expect(states(page)).toHaveCount(3);
+
+    const remove = states(page).first().getByRole('button', { name: /^Remove state/ });
+    await remove.tap();
+    const confirmation = page.getByRole('dialog', { name: 'Confirm removal' });
+    await expect(button(confirmation, 'Cancel')).toBeFocused();
+    await page.keyboard.press('Escape');
+    await expect(remove).toBeFocused();
+    await expect(states(page)).toHaveCount(3);
+    await remove.tap();
+    await acceptRemoval(page, /Remove the state saved/);
+    await expect(states(page)).toHaveCount(2);
+    await states(page).last().getByRole('button', { name: /^Select state/ }).tap();
+    await expect(choose).toBeFocused();
+    await button(page, 'Load state').tap();
+    await expect(status).toHaveText(/Previous progress.*recovery profile/);
+    expect(await ram(page, 0x6000)).toBe(1);
+    expect(await canvasImage(page)).toBe(overwritten);
+    const selectedState = await target(page).getAttribute('title');
+
+    let profiles = await nativeProfiles(page, 'Save 1');
+    await expect(button(profiles, 'Close')).toBeFocused();
+    await button(profiles, 'Remove Save 1').tap();
+    await expect(page.locator('#save-data-message')).toHaveText(/Remove the saved states/);
+    const recovery = profiles.getByRole('button', { name: /^Recovery · Current progress/ });
+    await recovery.tap();
+    await expect(openProfiles).toBeFocused();
+    expect(await ram(page, 0x6000)).toBe(2);
+    const recoveryName = await page.locator('#active-save-name').textContent();
+    profiles = await nativeProfiles(page, recoveryName);
+    await button(profiles, 'Duplicate current').tap();
+    profiles = await nativeProfiles(page, 'Save 2');
+    const native = await exportFrom(page, button(profiles, 'Export current save data'), '.srm');
+    expect(native.buffer[0]).toBe(2);
+    await button(profiles, 'New save').tap();
+    profiles = await nativeProfiles(page, 'Save 3');
+    expect(await ram(page, 0x6000)).toBe(0);
+    file = page.waitForEvent('filechooser');
+    await button(profiles, 'Import save data').tap();
+    await (await file).setFiles(native);
+    await expect(page.locator('#save-data-message')).toHaveText(/Imported as Save 4/);
+    await button(profiles, 'Remove Save 3').tap();
+    await acceptRemoval(page, /Remove Save 3 and its game save data/);
+    await expect(page.locator('#save-data-message')).toHaveText('Removed Save 3.');
+    await button(profiles, 'Save 1').tap();
+    await expect(openProfiles).toBeFocused();
+    await expect(target(page)).toHaveAttribute('title', selectedState);
+    await expect(fullscreen).toBeVisible();
+
+    await browse(page);
+    await expect(newState).toBeFocused();
+    // Model fullscreen dismissal by the browser while a modal is open.
+    await page.evaluate(() => document.exitFullscreen());
+    await expect(fullscreen).toHaveCount(0);
+    await expect(newState).toBeFocused();
+    await page.keyboard.press('Escape');
+    await expect(choose).toBeFocused();
+    await expect(target(page)).toHaveAttribute('title', selectedState);
+    await expect(page.locator('#active-save-name')).toHaveText('Save 1');
+    await expect(button(page, 'Play')).toBeEnabled();
+    expect(await page.evaluate(() => window.frames)).toBe(frameAtPause);
+  });
 });

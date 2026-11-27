@@ -31,6 +31,7 @@
   --accent: #306e59;
   --screen: #10161b;
   --nes-aspect: 256 / 240;
+  --notice-height: 32px;
 }
 * { box-sizing: border-box; }
 [hidden] { display: none !important; }
@@ -98,10 +99,11 @@ button:hover:enabled { background: #edf0ec; }
   border-radius: 12px;
   background: var(--screen);
 }
+.video-slot { display: contents; }
 .picture {
   position: relative;
   width: var(--video-width, 768px);
-  max-width: 100%;
+  max-width: min(100%, calc(max(160px, 100svh - 226px) * var(--nes-aspect)));
   aspect-ratio: var(--nes-aspect);
 }
 [data-scale="fit"] { --video-width: 640px; }
@@ -162,18 +164,33 @@ canvas:focus-visible { outline-offset: -3px; }
 .toolbar button { padding: 7px 12px; font-size: 13px; }
 .playback-controls, .toolbar-settings { display: contents; }
 .fullscreen-icon { display: none; }
-#play, #mute { width: 68px; }
+#play { width: 68px; }
 .sound, .options { display: flex; align-items: center; gap: 8px; }
 .sound { gap: 4px; }
+.toolbar #mute { display: grid; place-items: center; width: 44px; height: 44px; padding: 0; }
+#mute svg { pointer-events: none; }
+#mute .mute-mark, #mute[aria-pressed="true"] .sound-waves { display: none; }
+#mute[aria-pressed="true"] .mute-mark { display: initial; }
 #volume { width: 96px; height: 44px; margin: 0; accent-color: var(--accent); cursor: pointer; }
 .options label { display: flex; align-items: center; gap: 4px; color: var(--muted); font-size: 12px; }
 .options select { min-height: 32px; padding: 4px 6px; font-size: 13px; }
-#status { margin: 0 0 0 auto; color: #4c6256; font-size: 13px; overflow-wrap: anywhere; }
-#status:empty, #library-status:empty { display: none; }
+/* Keep the live region and its space through wrapping, replacement, and clearing. */
+#status {
+  grid-area: 3 / 1 / 4 / -1;
+  height: var(--notice-height);
+  margin: 0;
+  color: #4c6256;
+  font-size: 13px;
+  line-height: 16px;
+  overflow: auto;
+  overflow-wrap: anywhere;
+  overscroll-behavior: contain;
+}
+#library-status:empty { display: none; }
 #warnings { color: #805511; font-size: 13px; overflow-wrap: anywhere; }
 #save-versions { display: flex; flex-wrap: wrap; gap: 8px; }
 
-.touch, #exit-fullscreen, #fullscreen-disk-save { display: none; }
+.touch, .fullscreen-controls, #fullscreen-save-warning { display: none; }
 @media (max-width: 760px), (pointer: coarse), (orientation: landscape) and (max-height: 600px) and (max-width: 1100px) {
   main {
     --controller-width: clamp(132px, 23%, 156px);
@@ -184,12 +201,12 @@ canvas:focus-visible { outline-offset: -3px; }
   h1 { font-size: 20px; }
   .player { grid-template-columns: minmax(0, 1fr); gap: 12px; }
   .screen { padding: 6px; border-radius: 8px; }
-  .picture { max-width: min(100%, calc(max(120px, 100svh - 350px) * var(--nes-aspect))); }
+  .picture { max-width: min(100%, calc(max(96px, 100svh - 485px) * var(--nes-aspect))); }
   .game-entry { grid-area: 3 / 1; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 8px; }
   #change-cartridge { padding: 10px; font-size: 12px; }
   .toolbar { gap: 4px; }
   .toolbar button { padding: 7px 8px; }
-  #status { flex: 1 0 100%; margin: 0; }
+  #status { grid-area: 5 / 1; }
   .touch { grid-area: 4 / 1; display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
   .left-controls, .right-controls { display: grid; justify-items: center; grid-template-rows: 132px auto; gap: 8px; }
   .touch button, .dpad { touch-action: none; user-select: none; -webkit-touch-callout: none; }
@@ -223,8 +240,15 @@ canvas:focus-visible { outline-offset: -3px; }
   .toolbar:has(#state-controls:not([hidden])) .fullscreen-icon { display: inline; font-size: 17px; line-height: 1; }
 }
 @media (max-width: 400px) {
+  :root { --notice-height: 48px; }
   .toolbar button { padding-inline: 5px; font-size: 12px; }
-  #play, #mute { width: 54px; }
+  #play { width: 54px; }
+  .toolbar #choose-state { inline-size: 86px; }
+  .toolbar #reset { width: 39px; padding-inline: 2px; }
+  .toolbar :is(#save-state, #load-state) { width: 36px; padding-inline: 2px; }
+  .toolbar:has(#state-controls:not([hidden])) #fullscreen { width: 26px; padding-inline: 0; }
+  .toolbar .options, .toolbar .options label { gap: 2px; }
+  .toolbar .options select { padding-inline: 2px; }
   #volume { width: clamp(58px, 100vw - 264px, 96px); }
 }
 @media (orientation: landscape) and (max-height: 600px) and (max-width: 1100px),
@@ -234,7 +258,7 @@ canvas:focus-visible { outline-offset: -3px; }
   .controls-reference { right: 50%; transform: translateX(50%); }
   .player { grid-template-columns: var(--controller-width) minmax(0, 1fr) var(--controller-width); gap: 6px; }
   .screen { grid-area: 1 / 2; padding: 0; background: transparent; }
-  .picture { max-width: min(100%, calc(max(100px, 100svh - 152px) * var(--nes-aspect))); }
+  .picture { max-width: min(100%, calc(max(96px, 100svh - 188px) * var(--nes-aspect))); }
   .touch { display: contents; }
   .left-controls { grid-area: 1 / 1 / 3 / 2; align-self: center; }
   .right-controls { grid-area: 1 / 3 / 3 / 4; align-self: center; }
@@ -242,82 +266,106 @@ canvas:focus-visible { outline-offset: -3px; }
   .toolbar { grid-area: 3 / 1 / 4 / -1; justify-content: center; }
   .toolbar button { padding: 4px 6px; }
   #volume { width: 64px; height: 34px; }
-  #status { text-align: center; }
-  .player:has(#state-controls:not([hidden])) #status { flex: initial; }
+  #status { grid-area: 4 / 1 / 5 / -1; text-align: center; }
+  @media (max-width: 760px) {
+    .toolbar .fullscreen-label { display: none; }
+    .toolbar .fullscreen-icon { display: inline; font-size: 17px; line-height: 1; }
+    .toolbar #fullscreen { width: 28px; padding-inline: 0; }
+    .toolbar :is(#reset, #save-state, #load-state) { padding-inline: 3px; }
+    .toolbar .options { gap: 4px; }
+    .toolbar .options label { gap: 3px; }
+    .toolbar .options select { padding-inline: 2px; }
+  }
 }
 
 .game-presentation:fullscreen {
   display: grid;
-  grid-template: minmax(0, 1fr) / minmax(0, 1fr);
+  grid-template: minmax(0, 1fr) auto auto auto auto / minmax(0, 1fr);
+  padding: env(safe-area-inset-top) max(8px, env(safe-area-inset-right))
+    env(safe-area-inset-bottom) max(8px, env(safe-area-inset-left));
   background: #000;
 }
 .game-presentation:fullscreen .screen {
   grid-area: 1 / 1;
-  container-type: size;
+  grid-template-rows: minmax(0, 1fr) auto;
   padding: 0;
   border-radius: 0;
   background: transparent;
+}
+.game-presentation:fullscreen .video-slot {
+  display: grid;
+  place-items: center;
+  place-self: stretch;
+  container-type: size;
 }
 .game-presentation:fullscreen .picture {
   width: min(100cqw, calc(100cqh * var(--nes-aspect)));
   max-width: none;
 }
 .game-presentation:fullscreen .touch { display: none; }
-.game-presentation:fullscreen #exit-fullscreen {
-  display: block;
-  position: absolute;
-  z-index: 1;
-  top: max(8px, env(safe-area-inset-top));
-  right: max(8px, env(safe-area-inset-right));
+.game-presentation:fullscreen .fullscreen-controls {
+  grid-area: 3 / 1 / 4 / -1;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  padding-block-start: 4px;
+}
+.fullscreen-controls button {
   min-height: 44px;
-  padding: 6px 12px;
+  padding: 4px 8px;
   background: #20262b;
   border-color: #727c82;
   color: white;
   font-size: 13px;
 }
-.game-presentation:fullscreen #fullscreen-disk-save {
-  display: grid;
-  justify-items: start;
+.fullscreen-controls button:hover:enabled { background: #353d45; }
+.fullscreen-controls #save-data { width: 100px; max-width: none; }
+.fullscreen-controls #active-save-name { color: #c3cbd0; }
+.game-presentation:fullscreen #status {
+  grid-area: 4 / 1 / 5 / -1;
+  align-self: start;
+  color: #e3e8eb;
+  text-align: center;
+}
+.game-presentation:fullscreen #fullscreen-save-warning {
+  grid-area: 5 / 1 / 6 / -1;
+  justify-self: center;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
   gap: 8px;
-  position: absolute;
-  z-index: 1;
-  inset-block-start: max(8px, env(safe-area-inset-top));
-  inset-inline-start: max(8px, env(safe-area-inset-left));
-  inset-inline-end: calc(max(8px, env(safe-area-inset-right)) + 125px);
-  max-width: 440px;
-  padding: 8px 12px;
+  max-width: 720px;
+  padding: 4px 8px;
   border: 1px solid #727c82;
   border-radius: 8px;
   background: #20262b;
   color: white;
   font-size: 13px;
 }
-#fullscreen-disk-warning { margin: 0; overflow-wrap: anywhere; }
-#fullscreen-retry-disk { min-height: 44px; padding: 6px 12px; color: #252b32; }
+#fullscreen-save-message { flex: 1 1 200px; margin: 0; overflow-wrap: anywhere; }
+#fullscreen-retry-save { min-height: 44px; padding: 6px 12px; color: #252b32; }
+@media (max-width: 420px) {
+  .fullscreen-controls .fullscreen-label { display: none; }
+  .fullscreen-controls .fullscreen-icon { display: inline; font-size: 20px; line-height: 1; }
+  .fullscreen-controls #exit-fullscreen { min-width: 44px; }
+  .fullscreen-controls #choose-state { inline-size: 82px; }
+  .fullscreen-controls :is(#save-state, #load-state) { width: 44px; padding-inline: 3px; }
+  .fullscreen-controls #save-data { width: 70px; padding-inline: 4px; white-space: nowrap; }
+}
 @media (pointer: coarse) {
   .game-presentation:fullscreen {
-    grid-template-rows: minmax(0, 1fr) auto auto;
-    gap: 8px;
-    padding: max(8px, env(safe-area-inset-top)) max(8px, env(safe-area-inset-right))
-      max(8px, env(safe-area-inset-bottom)) max(8px, env(safe-area-inset-left));
+    padding-block: max(4px, env(safe-area-inset-top)) max(4px, env(safe-area-inset-bottom));
   }
-  .game-presentation:fullscreen .touch { display: grid; grid-area: 2 / 1; }
-  .game-presentation:fullscreen #fullscreen-disk-save {
-    inset-inline-end: max(8px, env(safe-area-inset-right));
-  }
-  .game-presentation:fullscreen #exit-fullscreen {
-    grid-area: 3 / 1 / 4 / -1;
-    justify-self: center;
-    position: static;
-  }
+  .game-presentation:fullscreen .touch { display: grid; grid-area: 2 / 1; margin-block-start: 4px; }
   @media (orientation: landscape) {
     .game-presentation:fullscreen {
-      grid-template: minmax(0, 1fr) auto / var(--controller-width) minmax(0, 1fr) var(--controller-width);
+      grid-template-columns: var(--controller-width) minmax(0, 1fr) var(--controller-width);
+      column-gap: 8px;
     }
     .game-presentation:fullscreen .screen { grid-area: 1 / 2; }
     .game-presentation:fullscreen .touch { display: contents; }
-    .game-presentation:fullscreen #exit-fullscreen { grid-row: 2; }
   }
 }
 
@@ -343,26 +391,31 @@ canvas:focus-visible { outline-offset: -3px; }
   border-color: #727c82;
 }
 #disk-controls button:hover:enabled { background: #353d45; }
-#disk-status { min-width: 84px; }
+#disk-toggle { min-width: 60px; }
+#disk-status { width: 100px; }
+@media (max-width: 400px), (orientation: landscape) and (max-height: 600px) and (max-width: 760px) {
+  #disk-controls { gap: 3px; padding-inline: 2px; font-size: 12px; }
+  #disk-controls button, #disk-controls select { padding-inline: 4px; }
+  #disk-toggle { min-width: 44px; }
+  #disk-status { width: 72px; line-height: 15px; }
+}
 .game-presentation:not(:fullscreen) .screen:has(#disk-controls:not([hidden])) .picture {
-  max-width: min(100%, calc(max(160px, 100svh - 212px) * var(--nes-aspect)));
+  max-width: min(100%, calc(max(160px, 100svh - 266px) * var(--nes-aspect)));
+}
+@media (max-width: 760px), (pointer: coarse), (orientation: landscape) and (max-height: 600px) and (max-width: 1100px) {
+  .game-presentation:not(:fullscreen) .screen:has(#disk-controls:not([hidden])) .picture {
+    max-width: min(100%, calc(max(96px, 100svh - 532px) * var(--nes-aspect)));
+  }
 }
 @media (orientation: landscape) and (max-height: 600px) and (max-width: 1100px),
        (orientation: landscape) and (pointer: coarse) {
   .game-presentation:not(:fullscreen) .screen:has(#disk-controls:not([hidden])) .picture {
-    max-width: min(100%, calc(max(100px, 100svh - 208px) * var(--nes-aspect)));
+    max-width: min(100%, calc(max(96px, 100svh - 237px) * var(--nes-aspect)));
   }
 }
 @media (pointer: coarse) {
   #disk-controls button, #disk-controls select { min-height: 44px; }
 }
-.game-presentation:fullscreen .screen:has(#disk-controls:not([hidden])) {
-  grid-template-rows: minmax(0, 1fr) auto;
-}
-.game-presentation:fullscreen .screen:has(#disk-controls:not([hidden])) .picture {
-  width: min(100cqw, calc(max(0px, 100cqh - 68px) * var(--nes-aspect)));
-}
-
 #state-controls { display: flex; gap: 3px; align-items: stretch; }
 #choose-state { inline-size: 112px; padding: 3px 4px; line-height: 1.15; white-space: nowrap; }
 #state-target { display: block; font-size: .85em; overflow: hidden; text-overflow: ellipsis; }
