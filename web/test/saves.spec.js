@@ -106,20 +106,18 @@ async function reopenBattery(page) {
   expect(await ram(page, 0x6000)).toBe(1);
 }
 
-test('loading a state with matching live SRAM saves it and backs up the older stored SRAM', async ({ page }) => {
+test('loading a state with matching live SRAM persists it without creating a profile', async ({ page }) => {
   await ready(page);
   await openWithUnsavedSram(page);
   await save(page);
   await button(page, 'Load state').click();
-  await expect(page.locator('#status')).toHaveText(/Previous progress.*a recovery profile/);
+  await expect(page.locator('#status')).toHaveText('State loaded.');
   await expect(button(page, 'Play')).toBeEnabled();
   await reopenBattery(page);
   await pause(page);
   const profiles = await nativeProfiles(page, 'Save 1');
-  await expect(profiles.getByRole('button', { name: /^Recovery ·/ })).toHaveCount(1);
-  await profiles.getByRole('button', { name: /^Recovery · Last saved progress ·/ }).click();
-  await expect(button(page, 'Play')).toBeEnabled();
-  expect(await ram(page, 0x6000)).toBe(0);
+  await expect(profiles.locator('#save-profiles li')).toHaveCount(1);
+  await expect(button(profiles, 'Save 1')).toHaveAttribute('aria-current', 'true');
 });
 
 test('reloading while an IndexedDB state write is queued preserves SRAM', async ({ page }) => {
@@ -282,21 +280,20 @@ test('unified history saves, overwrites, validates imports and explicitly loads 
   expect(errors).toEqual([]);
 });
 
-test('battery profiles adopt Save 1, retain displaced progress and abort failed writes', async ({ page }) => {
+test('battery states roll back Save 1 in place, preserve existing profiles and abort failed writes', async ({ page }) => {
   const media = await readFile(diagnostic);
   const id = createHash('sha256').update(media).digest('hex');
   const baseKey = 'nes-rust-neo/battery-v1/' + id;
+  const catalogKey = 'nes-rust-neo/profiles-v1/' + id;
+  const recovery = { id: '4bc1876e-3426-4a9f-935d-c3bcf574a221', name: 'Recovery · Current progress · 1/1/2026' };
+  const catalog = {
+    selected: 'save-1', next: 2, profiles: [{ id: 'save-1', name: 'Save 1' }, recovery],
+  };
   await page.addInitScript(() => {
     const write = Storage.prototype.setItem;
     Storage.prototype.setItem = function (key, data) {
-      if (window.failedRecovery && key.startsWith(window.failedRecovery + ':')) {
-        if (window.failedRecoveryAfter === 0) {
-          throw new DOMException('Injected recovery write failure', 'QuotaExceededError');
-        }
-        window.failedRecoveryAfter--;
-      }
-      if (window.failedCatalog && key.startsWith('nes-rust-neo/profiles-v1/')) {
-        throw new DOMException('Injected profile catalog failure', 'QuotaExceededError');
+      if (key === window.failedSramKey) {
+        throw new DOMException('Injected SRAM write failure', 'QuotaExceededError');
       }
       return write.call(this, key, data);
     };
@@ -311,11 +308,30 @@ test('battery profiles adopt Save 1, retain displaced progress and abort failed 
   await ready(page);
   const legacy = Buffer.alloc(8192);
   legacy[0] = 3;
-  await page.evaluate(([key, bytes]) => localStorage.setItem(key, bytes), [baseKey, legacy.toString('base64')]);
+  const recovered = Buffer.from(legacy);
+  recovered[0] = 5;
+  await page.evaluate(entries => {
+    for (const [key, value] of entries) localStorage.setItem(key, value);
+  }, [
+    [baseKey, legacy.toString('base64')],
+    [baseKey + ':' + recovery.id, recovered.toString('base64')],
+    [catalogKey, JSON.stringify(catalog)],
+  ]);
   await insert(page, 'battery.nes', media);
   await pause(page);
+  let profiles = await nativeProfiles(page, 'Save 1');
+  await button(profiles, recovery.name).click();
+  await expect(button(page, 'Play')).toBeEnabled();
+  expect(await ram(page, 0x6000)).toBe(5);
+  await save(page);
+  profiles = await nativeProfiles(page, recovery.name);
+  await button(profiles, 'Save 1').click();
+  await expect(button(page, 'Play')).toBeEnabled();
   expect(await ram(page, 0x6000)).toBe(3);
-  await expect(page.locator('#active-save-name')).toHaveText('Save 1');
+  await button(page, 'Play').click();
+  await expect.poll(() => ram(page, 0)).toBe(0xa5);
+  await pause(page);
+  const originalFrame = await canvasImage(page);
   await save(page);
   let picker = await browse(page);
   await expect(states(page)).toHaveCount(1);
@@ -334,10 +350,10 @@ test('battery profiles adopt Save 1, retain displaced progress and abort failed 
   });
   expect(await ram(page, 0x6000)).toBe(5);
   const newerFrame = await canvasImage(page);
+  expect(newerFrame).not.toBe(originalFrame);
   await page.evaluate(key => {
     window.failedSnapshot = true;
-    window.failedRecovery = key;
-    window.failedRecoveryAfter = 1;
+    window.failedSramKey = key;
   }, baseKey);
   await button(page, 'Save state').click();
   await expect(page.locator('#status')).toHaveText(/Could not save the state.*Injected snapshot write failure/);
@@ -352,52 +368,56 @@ test('battery profiles adopt Save 1, retain displaced progress and abort failed 
   expect(await canvasImage(page)).toBe(newerFrame);
   await expect(button(page, 'Play')).toBeEnabled();
   expect(await storedByte()).toBe(4);
-  expect(await page.evaluate(key => Object.keys(localStorage).filter(item => item.startsWith(key + ':')), baseKey)).toEqual([]);
-
   await page.evaluate(() => {
-    delete window.failedRecovery;
+    delete window.failedSramKey;
     delete window.failedSnapshot;
-    window.failedCatalog = true;
   });
-  await button(page, 'Load state').click();
-  // The previous quota notice is still visible while this load rolls back.
-  await expect(button(page, 'Load state')).toBeEnabled();
-  await expect(page.locator('#status')).toHaveText(/Could not load the state.*Browser storage is full/);
-  expect(await ram(page, 0x6000)).toBe(5);
-  expect(await storedByte()).toBe(4);
-  expect(await page.evaluate(key => Object.keys(localStorage).filter(item => item.startsWith(key + ':')), baseKey)).toEqual([]);
+  for (const repeat of [false, true]) {
+    if (repeat) {
+      await button(page, 'Play').click();
+      await progress(page, 4);
+      await pause(page);
+      await expect.poll(storedByte).toBe(4);
+    }
+    await button(page, 'Load state').click();
+    await expect(page.locator('#status')).toHaveText('State loaded.');
+    await expect(button(page, 'Play')).toBeEnabled();
+    await expect(page.locator('#active-save-name')).toHaveText('Save 1');
+    expect(await ram(page, 0x6000)).toBe(3);
+    expect(await storedByte()).toBe(3);
+    expect(await canvasImage(page)).toBe(originalFrame);
+    expect(await page.evaluate(key => JSON.parse(localStorage.getItem(key)), catalogKey)).toEqual(catalog);
+  }
 
-  await page.evaluate(() => { delete window.failedCatalog; });
-  await button(page, 'Load state').click();
-  await expect(page.locator('#status')).toHaveText(/Previous progress.*recovery profiles/);
-  expect(await ram(page, 0x6000)).toBe(3);
-  expect(await storedByte()).toBe(3);
-
-  let profiles = await nativeProfiles(page, 'Save 1');
+  profiles = await nativeProfiles(page, 'Save 1');
+  await expect(profiles.locator('#save-profiles li')).toHaveCount(2);
+  await expect(button(profiles, 'Save 1')).toHaveAttribute('aria-current', 'true');
   await button(profiles, 'Remove Save 1').click();
   await expect(page.locator('#save-data-message')).toHaveText(/Remove the saved states for Save 1/);
-  await expect(profiles.getByRole('button', { name: /^Recovery ·/ })).toHaveCount(2);
-  const lastSaved = profiles.getByRole('button', { name: /^Recovery · Last saved progress ·/ });
-  const lastSavedName = await lastSaved.textContent();
-  await lastSaved.click();
-  await expect(button(page, 'Play')).toBeEnabled();
-  expect(await ram(page, 0x6000)).toBe(4);
-  profiles = await nativeProfiles(page, lastSavedName);
-  const currentProgress = profiles.getByRole('button', { name: /^Recovery · Current progress ·/ });
-  const recovery = await currentProgress.textContent();
-  await currentProgress.click();
+  await button(profiles, recovery.name).click();
   await expect(button(page, 'Play')).toBeEnabled();
   expect(await ram(page, 0x6000)).toBe(5);
   await button(page, 'Reset').click();
   await expect(button(page, 'Play')).toBeEnabled();
   expect(await ram(page, 0x6000)).toBe(5);
   picker = await browse(page);
+  await expect(states(page)).toHaveCount(1);
+  await states(page).first().getByRole('button', { name: /^Select state/ }).click();
+  await button(page, 'Load state').click();
+  await expect(page.locator('#status')).toHaveText('State loaded.');
+  expect(await ram(page, 0x6000)).toBe(5);
+  picker = await browse(page);
+  await states(page).first().getByRole('button', { name: /^Remove state/ }).click();
+  await acceptRemoval(page, /Remove the state saved/);
   await expect(states(page)).toHaveCount(0);
   await button(picker, 'Close').click();
 
-  profiles = await nativeProfiles(page, recovery);
+  profiles = await nativeProfiles(page, recovery.name);
   await button(profiles, 'Duplicate current').click();
   profiles = await nativeProfiles(page, 'Save 2');
+  await button(profiles, 'Remove ' + recovery.name).click();
+  await acceptRemoval(page, /Remove Recovery/);
+  await expect(button(profiles, recovery.name)).toHaveCount(0);
   const sram = await exportFrom(page, button(profiles, 'Export current save data'), '.srm');
   expect(sram.buffer.length).toBe(8192);
   expect(sram.buffer[0]).toBe(5);
@@ -519,7 +539,7 @@ test.describe('touch fullscreen saves', () => {
     await states(page).last().getByRole('button', { name: /^Select state/ }).tap();
     await expect(choose).toBeFocused();
     await button(page, 'Load state').tap();
-    await expect(status).toHaveText(/Previous progress.*recovery profile/);
+    await expect(status).toHaveText('State loaded.');
     expect(await ram(page, 0x6000)).toBe(1);
     expect(await canvasImage(page)).toBe(overwritten);
     const selectedState = await target(page).getAttribute('title');
@@ -528,16 +548,11 @@ test.describe('touch fullscreen saves', () => {
     await expect(button(profiles, 'Close')).toBeFocused();
     await button(profiles, 'Remove Save 1').tap();
     await expect(page.locator('#save-data-message')).toHaveText(/Remove the saved states/);
-    const recovery = profiles.getByRole('button', { name: /^Recovery · Current progress/ });
-    await recovery.tap();
-    await expect(openProfiles).toBeFocused();
-    expect(await ram(page, 0x6000)).toBe(2);
-    const recoveryName = await page.locator('#active-save-name').textContent();
-    profiles = await nativeProfiles(page, recoveryName);
     await button(profiles, 'Duplicate current').tap();
+    await expect(openProfiles).toBeFocused();
     profiles = await nativeProfiles(page, 'Save 2');
     const native = await exportFrom(page, button(profiles, 'Export current save data'), '.srm');
-    expect(native.buffer[0]).toBe(2);
+    expect(native.buffer[0]).toBe(1);
     await button(profiles, 'New save').tap();
     profiles = await nativeProfiles(page, 'Save 3');
     expect(await ram(page, 0x6000)).toBe(0);

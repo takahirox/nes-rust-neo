@@ -141,9 +141,6 @@ for (const { name, viewport, media = ['NES', 'FDS'] } of geometries) {
           await expect(status).toBeEmpty();
           sameLayout(before, await layout(page));
           await load.tap();
-          await expect(status).toHaveText(/Previous progress.*recovery profile/);
-          sameLayout(before, await layout(page));
-          await load.tap();
           await expect(status).toHaveText('State loaded.');
           sameLayout(before, await layout(page));
 
@@ -162,13 +159,11 @@ for (const { name, viewport, media = ['NES', 'FDS'] } of geometries) {
           const saveData = page.locator('#save-data');
           const profiles = page.getByRole('dialog', { name: 'Save data' });
           await saveData.tap();
-          const recovery = profiles.getByRole('button', { name: /^Recovery · Current progress ·/ }).first();
-          const recoveryName = await recovery.textContent();
-          await recovery.tap();
+          await profiles.getByRole('button', { name: 'Duplicate current' }).tap();
           await expect(profiles).toBeHidden();
           await page.locator('#exit-fullscreen').tap();
           await expect(page.locator(':fullscreen')).toHaveCount(0);
-          await expect(page.locator('#active-save-name')).toHaveText(recoveryName);
+          await expect(page.locator('#active-save-name')).toHaveText('Save 2');
 
           const start = page.getByRole('button', { name: 'Start', exact: true });
           const profileBounds = await saveData.boundingBox();
@@ -176,7 +171,7 @@ for (const { name, viewport, media = ['NES', 'FDS'] } of geometries) {
           expect(profileBounds.x + profileBounds.width).toBeLessThanOrEqual(startBounds.x);
           await pressAndReleasePad(start);
           await saveData.tap();
-          await expect(profiles.getByRole('button', { name: recoveryName, exact: true })).toHaveAttribute('aria-current', 'true');
+          await expect(profiles.getByRole('button', { name: 'Save 2', exact: true })).toHaveAttribute('aria-current', 'true');
         }
       });
     }
@@ -241,7 +236,14 @@ test.describe('short portrait storage quota', () => {
   test.use({ viewport: { width: 320, height: 568 }, hasTouch: true, isMobile: true });
 
   for (const mode of ['normal', 'fullscreen']) {
-    test(`a full browser storage error fits and keeps the current game in ${mode}`, async ({ page }) => {
+    test(`a browser storage quota error fits and keeps the current game in ${mode}`, async ({ page }) => {
+      await page.addInitScript(() => {
+        const write = Storage.prototype.setItem;
+        Storage.prototype.setItem = function (key, data) {
+          if (key === window.failedSramKey) throw new DOMException('Injected SRAM write failure', 'QuotaExceededError');
+          return write.call(this, key, data);
+        };
+      });
       await openGame(page, false);
       const play = page.locator('#play');
       const status = page.locator('#status');
@@ -265,17 +267,7 @@ test.describe('short portrait storage quota', () => {
       const currentFrame = await canvasImage();
 
       await page.evaluate(() => {
-        let filler = '';
-        for (let size = 1024 * 1024; size >= 1024;) {
-          try {
-            const next = filler + 'x'.repeat(size);
-            localStorage.setItem('quota-test-fill', next);
-            filler = next;
-          } catch (error) {
-            if (error.name !== 'QuotaExceededError') throw error;
-            size /= 2;
-          }
-        }
+        window.failedSramKey = Object.keys(localStorage).find(key => key.startsWith('nes-rust-neo/battery-v1/'));
       });
 
       if (mode === 'fullscreen') {
@@ -293,9 +285,9 @@ test.describe('short portrait storage quota', () => {
       expect(await canvasImage()).toBe(currentFrame);
       await expect(play).toHaveText('Play');
 
-      await page.evaluate(() => localStorage.removeItem('quota-test-fill'));
+      await page.evaluate(() => { delete window.failedSramKey; });
       await load.tap();
-      await expect(status).toHaveText(/Previous progress.*recovery profile/);
+      await expect(status).toHaveText('State loaded.');
       expect(await sram()).toBe(0);
       await expect(play).toHaveText('Play');
     });
